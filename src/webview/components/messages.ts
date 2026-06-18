@@ -1737,7 +1737,7 @@ export const Messages = {
     shouldShowContinueAction(assistant: HTMLElement): boolean {
         if (assistant.querySelector('.task-checklist .todo:not(.done), .todo-tool-result .todo:not(.done)')) return true;
         const text = this.extractAssistantCopyText(assistant);
-        return /(鍙互缁х画|缁х画鎵ц|涓嬩竴姝鏈畬鎴恷寰呭畬鎴恷鍚庣画|鎺ョ潃鍋殀continue|next step|remaining work|follow[- ]?up)/i.test(text);
+        return /(可以继续|继续执行|下一步|未完成|待完成|后续|接着做|continue|next step|remaining work|follow[- ]?up)/i.test(text);
     },
 
     localizeAssistantActions(): void {},

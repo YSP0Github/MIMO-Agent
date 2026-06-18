@@ -489,8 +489,8 @@ export class MiMoAgent extends EventEmitter {
             return false;
         const headingCount = (clean.match(/^#{1,3}\s+\S+/gm) || []).length;
         const bulletCount = (clean.match(/^\s*(?:[-*]|\d+\.)\s+\S+/gm) || []).length;
-        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|final notes|follow-up|fix|fixed|implementation|implemented|总结|报告|审查|评审|结论|验证|后续|修复|实现|交付|结果|楠岃瘉|浜や粯|涓嬩竴姝)/i.test(clean);
-        const finalMarkers = /(done|completed|fixed|implemented|saved|resolved|shipped|finished|已完成|任务完成|完成总结|已修复|已实现|已保存|已交付|处理完成|浠诲姟瀹屾垚)/i.test(clean);
+        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|final notes|follow-up|fix|fixed|implementation|implemented|总结|报告|审查|评审|结论|验证|后续|修复|实现|交付|结果)/i.test(clean);
+        const finalMarkers = /(done|completed|fixed|implemented|saved|resolved|shipped|finished|已完成|任务完成|完成总结|交付完成|处理完成)/i.test(clean);
         const looksStructured = headingCount >= 2 || bulletCount >= 6;
         return reportMarkers && looksStructured && (finalMarkers || clean.length >= 3000);
     }
@@ -498,10 +498,10 @@ export class MiMoAgent extends EventEmitter {
         const clean = (text || '').trim();
         if (clean.length < 60)
             return false;
-        const hasDone = /(done|completed|final summary|task completed|finished|任务完成|已完成|完成总结|交付完成|处理完成|浠诲姟瀹屾垚)/i.test(clean);
-        const hasFile = /(\.(?:md|txt|json|html?|css|scss|less|tsx?|jsx?|js|py|java|go|rs)\b|artifacts?:|files? written|saved|generated|written|交付文件|文件[:：]|已保存|已生成|输出文件|浜や粯鏂囦欢)/i.test(clean);
-        const hasStats = /(stats?|DOI|tokens?|lines?|words?|validated|verification|验证|测试|校验|检查|已检查|行数|字数|耗时|轮次|楠岃瘉|妫€鏌)/i.test(clean);
-        const hasRiskOrNext = /(next|risk|warning|recommend|follow-up|下一步|风险|注意事项|建议|后续|涓嬩竴姝|寤鸿)/i.test(clean);
+        const hasDone = /(done|completed|final summary|task completed|finished|任务完成|已完成|完成总结|交付完成|处理完成)/i.test(clean);
+        const hasFile = /(\.(?:md|txt|json|html?|css|scss|less|tsx?|jsx?|js|py|java|go|rs)\b|artifacts?:|files? written|saved|generated|written|交付文件|文件[:：]|已保存|已生成|输出文件)/i.test(clean);
+        const hasStats = /(stats?|DOI|tokens?|lines?|words?|validated|verification|验证|测试|校验|检查|已检查|行数|字数|耗时|轮次)/i.test(clean);
+        const hasRiskOrNext = /(next|risk|warning|recommend|follow-up|下一步|风险|注意事项|建议|后续)/i.test(clean);
         return hasDone && hasFile && (hasStats || hasRiskOrNext);
     }
     private buildSummaryFilename(response: string): string {
