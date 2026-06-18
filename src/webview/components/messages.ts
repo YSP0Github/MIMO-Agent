@@ -495,7 +495,7 @@ export const Messages = {
             if (source.classList.contains('collapsible')) {
                 const expandBtn = createElement('button', 'expand-toggle sticky-expand') as HTMLButtonElement;
                 const syncExpandLabel = () => {
-                    expandBtn.textContent = source.classList.contains('expanded') ? '鏀惰捣' : '灞曞紑';
+                    expandBtn.textContent = source.classList.contains('expanded') ? '收起' : '展开';
                     clone.classList.toggle('expanded', source.classList.contains('expanded'));
                 };
                 syncExpandLabel();
@@ -2685,9 +2685,9 @@ export const Messages = {
         const card = createElement('div', 'diff-card history-diff-card');
         card.innerHTML =
             `<div class="diff-card-header">` +
-            `<span class="diff-card-icon">卤</span>` +
-            `<span class="diff-card-title">鍘嗗彶 Diff</span>` +
-            `<span class="diff-card-toggle">灞曞紑</span>` +
+            `<span class="diff-card-icon">D</span>` +
+            `<span class="diff-card-title">历史 Diff</span>` +
+            `<span class="diff-card-toggle">展开</span>` +
             `</div><div class="diff-card-body"></div>`;
         const body = card.querySelector<HTMLElement>('.diff-card-body');
         if (body) renderMessageGitDiff(body, diff.body);
@@ -2781,7 +2781,7 @@ export const Messages = {
     },
 
     isThinkingCompactPlaceholder(text: string): boolean {
-        return /(?:chars?\s+captured|Click to expand|宸叉崟鑾穦鐐瑰嚮灞曞紑)/i.test(String(text || ''));
+        return /(?:chars?\s+captured|Click to expand|已捕获\s+\d+\s+字符.*点击展开|思考中.*点击展开)/i.test(String(text || ''));
     },
 
     hydrateHistoryTaskChangeSnapshotCard(card: HTMLElement, snapshot?: HistoryTaskChangeSnapshot): void {
