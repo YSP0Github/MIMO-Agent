@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Messages component - chat messages, streaming, tool cards, diff view, thinking blocks.
  */
 import { store, ImageData } from '../core/store';
@@ -319,9 +319,9 @@ function renderFriendlyErrorHtml(text: string): string {
             })
             .filter(Boolean);
 
-    const reasons = [...collectSection('闂褰掑洜'), ...collectSection('鍘熷洜')];
-    const suggestions = collectSection('寤鸿')
-        .flatMap(item => item.split(/[锛?]/))
+    const reasons = [...collectSection('问题归因'), ...collectSection('原因')];
+    const suggestions = collectSection('建议')
+        .flatMap(item => item.split(/[；;]/))
         .map(item => item.trim())
         .filter(Boolean);
     const nextActions = collectSection('Next action');
@@ -338,7 +338,7 @@ function renderFriendlyErrorHtml(text: string): string {
     if (reasons.length) {
         sections.push(
             `<div class="friendly-error-section">` +
-            `<div class="friendly-error-label">鍘熷洜</div>` +
+            `<div class="friendly-error-label">原因</div>` +
             `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(reasons.join('\n'))}</div>` +
             `</div>`
         );
@@ -346,7 +346,7 @@ function renderFriendlyErrorHtml(text: string): string {
     if (suggestions.length) {
         sections.push(
             `<div class="friendly-error-section">` +
-            `<div class="friendly-error-label">寤鸿</div>` +
+            `<div class="friendly-error-label">建议</div>` +
             `<ul class="friendly-error-list">${suggestions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` +
             `</div>`
         );
@@ -391,7 +391,7 @@ function renderFriendlyErrorHtml(text: string): string {
         `<div class="friendly-error-title">${escapeHtml(title)}</div>` +
         (sections.length ? sections.join('') : `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(raw)}</div>`) +
         (leftovers.length
-            ? `<details class="friendly-error-raw"><summary>鍘熷淇℃伅</summary><pre>${escapeHtml(leftovers.join('\n'))}</pre></details>`
+            ? `<details class="friendly-error-raw"><summary>原始信息</summary><pre>${escapeHtml(leftovers.join('\n'))}</pre></details>`
             : '') +
         `</div>`
     );
@@ -1049,7 +1049,7 @@ export const Messages = {
 
     // Tool cards
     addToolCard(name: string, args: any): void {
-        // Mark thinking as done 鈥?tool execution means reasoning for this round is complete
+        // Mark thinking as done -tool execution means reasoning for this round is complete
         this._markThinkingDone();
         this.markLiveProgressToolStart(name, args);
 

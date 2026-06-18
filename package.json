@@ -2,7 +2,7 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.7.6",
+  "version": "1.7.7",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {
@@ -279,6 +279,7 @@
     "highlight.js": "^11.11.1",
     "http-proxy-agent": "^7.0.2",
     "https-proxy-agent": "^7.0.6",
+    "katex": "^0.17.0",
     "puppeteer-core": "^25.1.0"
   }
 }

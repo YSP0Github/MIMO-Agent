@@ -1,4 +1,4 @@
-﻿import * as vscode from 'vscode';
+import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -482,7 +482,7 @@ interface PanelState {
     activeHandlers?: any;
     /** Message queue: messages sent while agent is running */
     messageQueue: Array<{ text: string; images?: Array<{ dataUrl: string; name: string; size: number }> }>;
-    /** Voice input state 鈥?per-panel */
+    /** Voice input state -per-panel */
     voiceProcess?: ReturnType<typeof exec> | null;
     voiceResultFile?: string;
     voicePsFile?: string;
@@ -856,7 +856,7 @@ export class ChatViewProvider {
 
     /** Create a new MIMO panel (always creates fresh) */
     show(_forceNew = true) {
-        // Always create new panel 鈥?each click = new window
+        // Always create new panel -each click = new window
         const splitEditor = this.panels.size === 0;
         this.createPanel(splitEditor);
     }
@@ -952,7 +952,7 @@ export class ChatViewProvider {
         this.panel = panel;
         state.pendingInit = { firstId: convId, fresh: restored.fresh };
 
-        // On panel close 鈥?remove from map
+        // On panel close -remove from map
         panel.onDidDispose(() => {
             this.panels.delete(panelId);
             if (this.panel === panel) this.panel = undefined;
@@ -960,7 +960,7 @@ export class ChatViewProvider {
 
         panel.webview.html = this.getHtml(panel.webview);
 
-        // Handle visibility changes 鈥?restore state when panel is shown again
+        // Handle visibility changes -restore state when panel is shown again
         panel.onDidChangeViewState((e) => {
             if (e.webviewPanel.visible) {
                 this.panel = e.webviewPanel;
@@ -969,7 +969,7 @@ export class ChatViewProvider {
             }
         });
 
-        // Handle messages from webview 鈥?capture panelId and convId in closure
+        // Handle messages from webview -capture panelId and convId in closure
         panel.webview.onDidReceiveMessage(async (msg) => {
             this.panel = panel;
             const post = (m: any) => panel.webview.postMessage(m);
@@ -979,17 +979,17 @@ export class ChatViewProvider {
                     const initialLang = restoredState?.uiLang || this.getPreferredUiLang();
                     post({ type: 'setLang', lang: initialLang });
 
-                    // ALWAYS initialize 鈥?no dependency on pendingInit
+                    // ALWAYS initialize -no dependency on pendingInit
                     const st = this.panels.get(panelId);
                     let myConvId = st?.activeConvId;
                     if (!myConvId) break;
                     this.agent.setUiLang(initialLang, myConvId);
                     console.log(`[MiMo] ready: panelId=${panelId}, myConvId=${myConvId}, convCount=${this.agent.getConversation(myConvId)?.messages.length ?? 'N/A'}`);
 
-                    // 1. Verify conversation exists 鈥?if not, create fresh one
+                    // 1. Verify conversation exists -if not, create fresh one
                     let initConv = this.agent.getConversation(myConvId);
                     if (!initConv && st) {
-                        // Conversation was lost 鈥?create fresh one for this panel
+                        // Conversation was lost -create fresh one for this panel
                         const freshId = this.agent.createConversation();
                         st.convIds = [freshId];
                         st.activeConvId = freshId;
@@ -1067,7 +1067,7 @@ export class ChatViewProvider {
                     break;
                 }
                 case 'closeChat': {
-                    // Don't delete 鈥?just switch to another conversation in THIS panel
+                    // Don't delete -just switch to another conversation in THIS panel
                     const st3 = this.panels.get(panelId);
                     if (st3) {
                         // Remove from panel's conversation list
@@ -1191,14 +1191,14 @@ export class ChatViewProvider {
                 }
                 case 'stop': {
                     const stStop = this.panels.get(panelId);
-                    // Immediately update UI 鈥?don't wait for agent to finish
+                    // Immediately update UI -don't wait for agent to finish
                     post({ type: 'idle' });
                     // Clear message queue so queued messages don't auto-send
                     if (stStop) stStop.messageQueue = [];
                     if (stStop) stStop.stopRequested = true;
                     // Clear webview queue display too
                     post({ type: 'clearQueue' });
-                    // Abort the agent 鈥?only if we have a valid convId
+                    // Abort the agent -only if we have a valid convId
                     if (stStop?.activeConvId) {
                         this.agent.abort(stStop.activeConvId);
                     }
@@ -1291,7 +1291,7 @@ export class ChatViewProvider {
                         }
 
                         if (foundPanel) {
-                            // Already open 鈥?just reveal/focus that panel
+                            // Already open -just reveal/focus that panel
                             foundPanel.panel.reveal(vscode.ViewColumn.Active, false);
                             this.agent.loadConversation(id, histConv.title, histConv.messages, histConv.model, {
                                 mode: sanitizeMode(histConv.mode),
@@ -1311,7 +1311,7 @@ export class ChatViewProvider {
                             foundPanel.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
                             this.postInputHistory(foundPanel.panel, id);
                         } else {
-                            // Not open 鈥?create a NEW panel (don't touch current one)
+                            // Not open -create a NEW panel (don't touch current one)
                             const newPanelId = this.createPanel(false);
                             const newState = this.panels.get(newPanelId)!;
                             this.agent.loadConversation(id, histConv.title, histConv.messages, histConv.model, {
@@ -1434,7 +1434,7 @@ export class ChatViewProvider {
                     break;
                 }
                 case 'openUrl': {
-                    // Open URL in default browser 鈥?only allow http(s) protocols
+                    // Open URL in default browser -only allow http(s) protocols
                     try {
                         const rawUrl = sanitizeString(msg.url, 2048);
                         if (!rawUrl) break;
@@ -1710,7 +1710,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const panelState = this.findStateByPanel(panel);
         // Local post function - always sends to THIS panel, no race condition.
         const rawPost = (msg: any) => panel.webview.postMessage(msg);
-        // MUST have a valid convId 鈥?never fall back to global activeId
+        // MUST have a valid convId -never fall back to global activeId
         if (!convId) return;
         const activeId = convId;
         console.log(`[MiMo] handleUserMessage: convId=${activeId}, msgCount=${this.agent.getConversation(activeId)?.messages.length ?? 'N/A'}`);
@@ -1798,7 +1798,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             }
         };
         try {
-        // Build event handlers 鈥?store for potential reconnection
+        // Build event handlers -store for potential reconnection
         const handlers = {
                 onToken: (token: string) => {
                     responseText += token;
@@ -3011,7 +3011,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         // Only restore messages on FIRST restore (retainContextWhenHidden preserves DOM).
         if (st7?.restored) return;
 
-        // Fresh conversation with no messages 鈥?keep welcome page
+        // Fresh conversation with no messages -keep welcome page
         if (conv.messages.length === 0) {
             if (st7) st7.restored = true;
             return;
@@ -3156,11 +3156,12 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy"
     content="default-src 'none';
-             style-src 'unsafe-inline' https://fonts.googleapis.com;
-             font-src https://fonts.gstatic.com;
+             style-src 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net;
+             font-src https://fonts.gstatic.com https://cdn.jsdelivr.net;
              script-src 'nonce-${nonce}';
              img-src 'self' data: blob:;">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <style>${this.cssContent}</style>
 </head>
 <body>

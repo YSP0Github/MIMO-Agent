@@ -289,6 +289,20 @@ export class HistoryManager {
             .slice(0, 12);
     }
 
+    private extractUserImagesFromMessage(message: ChatMessage): SavedInputHistoryImage[] {
+        const uiImages = Array.isArray(message._uiImages)
+            ? message._uiImages
+                .map((image, index) => ({
+                    dataUrl: String(image?.dataUrl || ''),
+                    name: String(image?.name || `image-${index + 1}`),
+                    size: Number(image?.size || 0),
+                }))
+                .filter(image => /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(image.dataUrl))
+                .slice(0, 12)
+            : [];
+        return uiImages.length > 0 ? uiImages : this.extractUserImages(message.content);
+    }
+
     // ── Public API ──
 
     /**
@@ -317,6 +331,7 @@ export class HistoryManager {
             const needsReasoning = m.role === 'assistant' && m.reasoning_content === undefined;
             const needsToolName = m.role === 'tool' && !m._toolName && m.tool_call_id;
             const needsSnapshotCopy = m.role === 'assistant' && m._uiSnapshot !== undefined;
+            const needsUiImagesCopy = m.role === 'user' && m._uiImages !== undefined;
             const maxContent = m.role === 'tool' ? 200_000 : m.role === 'assistant' ? 200_000 : 500_000;
             const content = this.trimContent(m.content, maxContent);
             const reasoning = m.role === 'assistant' && m.reasoning_content
@@ -324,7 +339,7 @@ export class HistoryManager {
                 : m.reasoning_content;
 
             // Skip copy if message is already well-formed
-            if (!needsContent && !needsReasoning && !needsToolName && !needsSnapshotCopy && content === m.content && reasoning === m.reasoning_content) {
+            if (!needsContent && !needsReasoning && !needsToolName && !needsSnapshotCopy && !needsUiImagesCopy && content === m.content && reasoning === m.reasoning_content) {
                 return m;
             }
 
@@ -338,6 +353,10 @@ export class HistoryManager {
                 if (m.tool_calls) copy.tool_calls = m.tool_calls;
                 if (m._elapsedSec !== undefined) copy._elapsedSec = m._elapsedSec;
                 if (m._uiSnapshot !== undefined) copy._uiSnapshot = m._uiSnapshot;
+            }
+
+            if (m.role === 'user' && m._uiImages !== undefined) {
+                copy._uiImages = m._uiImages;
             }
 
             if (m.role === 'tool') {
@@ -361,7 +380,7 @@ export class HistoryManager {
             const msg = messages[i];
             if (msg.role !== 'user') continue;
             const text = this.extractText(msg.content).trim();
-            const images = this.extractUserImages(msg.content);
+            const images = this.extractUserImagesFromMessage(msg);
             if (!text && images.length === 0) continue;
             const key = JSON.stringify({ text, images: images.map(image => image.dataUrl) });
             if (seen.has(key)) continue;

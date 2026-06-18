@@ -2,6 +2,7 @@ import { ChatMessage, ContentPart, MiMoAPI } from './api';
 import { MiMoConfig } from './config';
 import { getContextStats } from './context';
 import { ConversationState } from './agentTypes';
+import { MODEL_CAPABILITIES, inferModelCapabilities } from './modelCapabilities';
 
 export type TaskComplexity = 'simple' | 'moderate' | 'complex';
 
@@ -59,18 +60,44 @@ export class AgentContextRuntime {
         return start;
     }
 
+    private modelSupportsVision(model: string): boolean {
+        return (MODEL_CAPABILITIES[model] || inferModelCapabilities(model)).vision;
+    }
+
+    private buildModelSafeRuntimeMessages(messages: ChatMessage[], model: string): ChatMessage[] {
+        if (this.modelSupportsVision(model)) return messages;
+        return messages.map((message) => {
+            if (!Array.isArray(message.content)) return message;
+            const textParts: string[] = [];
+            let imageCount = 0;
+            for (const part of message.content) {
+                if (part?.type === 'text' && part.text) {
+                    textParts.push(part.text);
+                } else if (part?.type === 'image_url') {
+                    imageCount++;
+                }
+            }
+            if (imageCount === 0) return message;
+            const imageNote = `[${imageCount} image${imageCount === 1 ? '' : 's'} were attached earlier. If image details were needed, they were converted to text in the corresponding user turn.]`;
+            return {
+                ...message,
+                content: [...textParts, imageNote].filter(Boolean).join('\n\n'),
+            };
+        });
+    }
+
     buildRuntimeContextMessages(conv: ConversationState): ChatMessage[] {
         const covered = Math.max(0, Math.min(conv.contextSummaryMessageCount || 0, conv.messages.length));
         if (!conv.contextSummary || covered <= 0) {
-            return conv.messages;
+            return this.buildModelSafeRuntimeMessages(conv.messages, conv.model);
         }
-        return [
+        return this.buildModelSafeRuntimeMessages([
             {
                 role: 'system',
                 content: `[Auto Context Summary - ${covered} earlier messages compressed]\n${conv.contextSummary}`,
             } as any,
             ...conv.messages.slice(covered),
-        ];
+        ], conv.model);
     }
 
     shouldRefreshContextMemory(

@@ -28,6 +28,8 @@ export interface ChatMessage {
     _elapsedSec?: number;
     /** Replay metadata - serialized webview turn snapshot for high-fidelity history */
     _uiSnapshot?: any;
+    /** Replay metadata - original user images when the model-facing content was converted to text */
+    _uiImages?: Array<{ dataUrl: string; name: string; size: number }>;
 }
 
 export interface ContentPart {

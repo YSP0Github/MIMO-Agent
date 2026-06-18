@@ -383,6 +383,25 @@ describe('agent convergence guards', () => {
         expect(agent.findVisionModel('mimo-v2.5-pro', 'mimo-cn')).toBe('mimo-v2.5');
     });
 
+    it('keeps image history text-only for non-vision main models', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            {
+                role: 'user',
+                content: [
+                    { type: 'text', text: 'Please inspect this screenshot' },
+                    { type: 'image_url', image_url: { url: 'data:image/png;base64,aaaa' } },
+                ],
+            } as any,
+        ]);
+        conv.model = 'mimo-v2.5-pro';
+
+        const runtimeMessages = agent.buildRuntimeContextMessages(conv);
+        expect(Array.isArray(runtimeMessages[0].content)).toBe(false);
+        expect(String(runtimeMessages[0].content)).toContain('Please inspect this screenshot');
+        expect(String(runtimeMessages[0].content)).toContain('1 image');
+    });
+
     it('distinguishes the same model id on different endpoints', () => {
         const agent = makeAgent();
         agent.updateConfig({

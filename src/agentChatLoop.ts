@@ -82,36 +82,49 @@ export async function doChatImpl(
             this.saveConversations();
         }
 
-        // Auto-fallback: if images are sent with a non-vision model, switch to a configured vision model.
-        if (images && images.length > 0) {
-            const caps = this.getModelCapabilities(conv.model);
-            if (!caps.vision) {
-                const fallbackModel = this.findVisionModel(conv.model, endpointId);
-                if (!fallbackModel) {
-                    const msg = `Current model "${conv.model}" is not known to support images. Add a vision-capable model to settings (api.models) or switch models before sending images.`;
-                    events.onDone(msg);
-                    events.onError(msg);
-                    return msg;
-                }
-                const oldModel = conv.model;
-                conv.model = fallbackModel;
-                conv.modelEndpointId = endpointId;
-                emitSystemNote(`Model auto-switched: ${oldModel} -> ${fallbackModel} for image support`);
-                events.onStatus(`Model auto-switched to ${fallbackModel} for vision`);
-                events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'image');
-                this.saveConversations();
+        // If the selected model is text-only, analyze newly attached images with a
+        // vision fallback and feed the text result back into the selected model.
+        this.stoppingConversations.delete(effectiveConvId);
+        const abortController = new AbortController();
+        this.abortControllers.set(effectiveConvId, abortController);
+        const signal = abortController.signal;
+        let imageTextContext = '';
+        if (images && images.length > 0 && !this.getModelCapabilities(conv.model).vision) {
+            const visionModel = this.findVisionModel(conv.model, endpointId);
+            if (!visionModel) {
+                const msg = `Current model "${conv.model}" is not known to support images, and no vision-capable MiMo fallback model is available for image analysis. Add mimo-v2.5 to this endpoint or switch models before sending images.`;
+                events.onDone(msg);
+                events.onError(msg);
+                return msg;
+            }
+            try {
+                events.onStatus(`Analyzing image with ${visionModel}...`);
+                imageTextContext = await this.analyzeImagesForTextContext(images, conv, endpointId, signal);
+                events.onReasoning(`[Image context] Analyzed ${images.length} image${images.length === 1 ? '' : 's'} with ${visionModel}; continuing with ${conv.model}.`);
+            } catch (e: any) {
+                const msg = `Image analysis failed before sending to "${conv.model}": ${String(e?.message || e)}`;
+                events.onDone(msg);
+                events.onError(msg);
+                return msg;
             }
         }
 
 
         // Adversarial mode: dual-brain execution
         if (conv.mode === 'adversarial') {
-            return this.adversarialChat(userInput, events, images, effectiveConvId);
+            return this.adversarialChat(
+                imageTextContext ? this.buildTextOnlyContentFromImages(userInput, imageTextContext) : userInput,
+                events,
+                imageTextContext ? undefined : images,
+                effectiveConvId,
+            );
         }
 
         // Build user message content (with optional images)
         let userContent: string | ContentPart[];
-        if (images && images.length > 0) {
+        if (imageTextContext) {
+            userContent = this.buildTextOnlyContentFromImages(userInput, imageTextContext);
+        } else if (images && images.length > 0) {
             userContent = [{ type: 'text', text: userInput }];
             for (const img of images) {
                 userContent.push({ type: 'image_url', image_url: { url: img.dataUrl } });
@@ -120,12 +133,15 @@ export async function doChatImpl(
             userContent = userInput;
         }
         console.log(`[MiMo chat] Starting: convId=${effectiveConvId}, existing messages=${conv.messages.length}`);
-        // Clear any stale stopping state from a previous run
-        this.stoppingConversations.delete(effectiveConvId);
-        conv.messages.push({ role: 'user', content: userContent });
-        const abortController = new AbortController();
-        this.abortControllers.set(effectiveConvId, abortController);
-        const signal = abortController.signal;
+        const userMessage: ChatMessage = { role: 'user', content: userContent };
+        if (imageTextContext && images?.length) {
+            userMessage._uiImages = images.map(image => ({
+                dataUrl: image.dataUrl,
+                name: image.name,
+                size: image.size,
+            }));
+        }
+        conv.messages.push(userMessage);
 
         // ── Greeting / trivial input detection: shortcuts for all modes ──
         // Run BEFORE persona detection to avoid wasting CPU on trivial inputs

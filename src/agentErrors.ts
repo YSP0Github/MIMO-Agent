@@ -22,7 +22,7 @@ export const MIMO_ERROR_CODES: Record<string, MimoErrorCodeInfo> = {
         suggestionsZh: [
             '检查 JSON 格式、必需参数、参数范围和消息结构。',
             '确认模型名存在，并且当前接口支持该模型和图像/多模态输入。',
-            '多轮对话思考模式下，工具返回后需要保留完整的 reasoning_content 字段。',
+            '多轮思考模式下，工具返回后需要保留完整的 reasoning_content 字段。',
         ],
         titleEn: 'Bad request format',
         suggestionsEn: [
@@ -34,11 +34,11 @@ export const MIMO_ERROR_CODES: Record<string, MimoErrorCodeInfo> = {
     '401': {
         code: '401',
         titleZh: '认证失败',
-        originZh: '更可能是用户配置或账户凭证问题，不是 Agent 执行逻辑或大模型推理问题。',
+        originZh: '更可能是用户配置或账号凭证问题，不是 Agent 执行逻辑或大模型推理问题。',
         reasonZh: 'API Key 缺失、无效，Authorization 请求头格式错误，或 Token Plan 与按量付费 API 的 Base URL/API Key 混用。',
         suggestionsZh: [
             '检查 API Key 和 Authorization 请求头格式。',
-            '如果使用 Token Plan，请确认 Base URL 和 API Key 是同一套餐下的专属配置。',
+            '如果使用 Token Plan，请确认 Base URL 和 API Key 是同一套套餐下的专属配置。',
         ],
         titleEn: 'Authentication failed',
         suggestionsEn: [
@@ -114,7 +114,7 @@ export const MIMO_ERROR_CODES: Record<string, MimoErrorCodeInfo> = {
     },
     '503': {
         code: '503',
-        titleZh: '服务器故障',
+        titleZh: '服务不可用',
         originZh: '更可能是 MiMo API 服务侧负载或临时不可用，不是 Agent 本地执行问题。',
         reasonZh: '服务器负载过高或暂时不可用。',
         suggestionsZh: ['请稍后重试。'],

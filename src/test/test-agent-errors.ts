@@ -14,7 +14,7 @@ describe('MiMo API friendly errors', () => {
 
         expect(text).toContain('MiMo API 返回 401');
         expect(text).toContain('问题归因：');
-        expect(text).toContain('用户配置或账户凭证问题');
+        expect(text).toContain('用户配置或账号凭证问题');
         expect(text).toContain('原因：');
         expect(text).toContain('建议：');
         expect(text).toContain('Token Plan');

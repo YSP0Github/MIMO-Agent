@@ -5,6 +5,7 @@
  */
 
 import hljs from 'highlight.js';
+import katex from 'katex';
 
 function escapeHtml(s: string): string {
     return s
@@ -35,6 +36,61 @@ function renderFileLink(label: string, filePath: string, line?: string): string 
     const cleanPath = filePath.replace(/&amp;/g, '&').trim();
     const lineAttr = line ? ` data-line="${escapeHtml(line)}"` : '';
     return `<a href="#" class="md-link file-link" data-file="${escapeHtml(cleanPath)}"${lineAttr}>${label}</a>`;
+}
+
+// ── LaTeX math helpers ──
+
+interface LatexBlock { raw: string; tex: string; display: boolean; }
+
+/**
+ * Extract $$...$$ (display) and $...$ (inline) math from raw text,
+ * returning placeholders __LATEX_BLOCK_N__ and the extracted blocks.
+ */
+function extractLatex(text: string): { text: string; blocks: LatexBlock[] } {
+    const blocks: LatexBlock[] = [];
+    let s = text;
+
+    // 1) $$display$$ — must come first (greedy across lines)
+    s = s.replace(/\$\$([\s\S]+?)\$\$/g, (_: string, tex: string) => {
+        const idx = blocks.length;
+        blocks.push({ raw: `$$${tex}$$`, tex: tex.trim(), display: true });
+        return `\n__LATEX_BLOCK_${idx}__\n`;
+    });
+
+    // 2) $inline$ — single-line, must not start/end with whitespace
+    s = s.replace(/\$([^\s$][\s\S]*?[^\s$])\$/g, (_: string, tex: string) => {
+        const idx = blocks.length;
+        blocks.push({ raw: `$${tex}$`, tex: tex.trim(), display: false });
+        return `__LATEX_BLOCK_${idx}__`;
+    });
+
+    return { text: s, blocks };
+}
+
+/**
+ * Render a single LaTeX block to HTML via KaTeX. Returns the rendered
+ * HTML string. On failure returns the escaped raw source so the user
+ * still sees the formula text.
+ */
+function renderLatexBlock(block: LatexBlock): string {
+    try {
+        const html = katex.renderToString(block.tex, {
+            displayMode: block.display,
+            throwOnError: false,
+            output: 'html',
+            strict: false,
+            trust: true,
+        });
+        if (block.display) {
+            return `<div class="latex-display">${html}</div>`;
+        }
+        return `<span class="latex-inline">${html}</span>`;
+    } catch {
+        const escaped = escapeHtml(block.raw);
+        return block.display
+            ? `<div class="latex-display latex-fallback"><code>${escaped}</code></div>`
+            : `<span class="latex-inline latex-fallback"><code>${escaped}</code></span>`;
+    }
 }
 
 function replaceOutsideInlineCodeAndLinks(input: string, replacer: (chunk: string) => string): string {
@@ -99,6 +155,10 @@ export function renderMarkdown(text: string): string {
         codeBlocks.push({ lang: '', code });
         return `\n__CODE_BLOCK_${idx}__\n`;
     });
+
+    // 1b. Extract LaTeX math blocks BEFORE escaping
+    const { text: latexText, blocks: latexBlocks } = extractLatex(s);
+    s = latexText;
 
     // 2. Escape HTML for the rest of the content
     s = escapeHtml(s);
@@ -270,6 +330,9 @@ export function renderMarkdown(text: string): string {
     // Restore fenced code blocks last so markdown rules never rewrite code content.
     s = s.replace(/__CODE_BLOCK_(\d+)__/g, (_: string, i: string) => renderedCodeBlocks[parseInt(i)] || '');
 
+    // Restore LaTeX blocks
+    s = s.replace(/__LATEX_BLOCK_(\d+)__/g, (_: string, i: string) => renderLatexBlock(latexBlocks[parseInt(i)]));
+
     // Final cleanup: collapse multiple spaces, trim
     s = s.replace(/  +/g, ' ');
     s = s.trim();
@@ -291,6 +354,10 @@ export function renderStreamingMarkdown(text: string): string {
         codeBlocks.push({ lang: '', code });
         return `\n__STREAM_CODE_BLOCK_${idx}__\n`;
     });
+
+    // Extract LaTeX math before escaping
+    const { text: latexText, blocks: latexBlocks } = extractLatex(s);
+    s = latexText;
 
     s = escapeHtml(s);
     const renderedCodeBlocks = codeBlocks.map(({ lang, code }) => {
@@ -353,5 +420,7 @@ export function renderStreamingMarkdown(text: string): string {
     s = s.replace(/__STREAM_PARA_GAP__/g, '\n');
     s = s.replace(/__STREAM_BLOCK_(\d+)__/g, (_: string, i: string) => blocks[parseInt(i)] || '');
     s = s.replace(/__STREAM_CODE_BLOCK_(\d+)__/g, (_: string, i: string) => renderedCodeBlocks[parseInt(i)] || '');
+    // Restore LaTeX blocks
+    s = s.replace(/__LATEX_BLOCK_(\d+)__/g, (_: string, i: string) => renderLatexBlock(latexBlocks[parseInt(i)]));
     return s.replace(/  +/g, ' ').trim();
 }

@@ -770,3 +770,44 @@ body.ui-minimal .diff-line.diff-add,body.ui-minimal .diff-line.diff-del,body.ui-
 body.ui-minimal .diff-line .diff-sign,body.ui-minimal .diff-line .diff-ln,body.ui-minimal .diff-card-line .diff-ln{color:var(--vscode-descriptionForeground)!important}
 body.ui-minimal .hljs-keyword,body.ui-minimal .hljs-selector-tag,body.ui-minimal .hljs-built_in,body.ui-minimal .hljs-string,body.ui-minimal .hljs-attr,body.ui-minimal .hljs-number,body.ui-minimal .hljs-literal,body.ui-minimal .hljs-comment,body.ui-minimal .hljs-doctag,body.ui-minimal .hljs-function,body.ui-minimal .hljs-title,body.ui-minimal .hljs-type,body.ui-minimal .hljs-variable,body.ui-minimal .hljs-template-variable,body.ui-minimal .hljs-meta,body.ui-minimal .hljs-tag,body.ui-minimal .hljs-name,body.ui-minimal .hljs-attribute,body.ui-minimal .hljs-symbol,body.ui-minimal .hljs-bullet{color:var(--vscode-foreground)!important}
 body.ui-minimal .hljs-addition,body.ui-minimal .hljs-deletion{background:transparent!important;color:var(--vscode-foreground)!important}
+
+/* ── KaTeX math rendering ── */
+.latex-display{text-align:center;margin:12px 0;overflow-x:auto;overflow-y:hidden;padding:4px 0}
+.latex-display .katex{font-size:1.15em;color:var(--vscode-foreground)}
+.latex-inline{color:var(--vscode-foreground)}
+.latex-inline .katex{font-size:1em}
+.latex-fallback code{background:var(--vscode-textCodeBlock-background);padding:2px 6px;border-radius:3px;font-size:0.9em}
+/* KaTeX base styles — minimal subset for VS Code webview */
+.katex{font:normal 1.21em KaTeX_Main,Times New Roman,serif;line-height:1.2;text-indent:0;text-rendering:auto;display:inline;white-space:nowrap}
+.katex-display{display:block;margin:1em 0;text-align:center;white-space:nowrap}
+.katex-display>.katex{text-align:center}
+.katex-display>.katex>.katex-html{display:block;position:relative}
+.katex-display>.katex>.katex-html>.katex-strut{display:inline-block}
+.katex .katex-html{position:relative}
+.katex .katex-mathml{position:absolute;clip:rect(1px,1px,1px,1px);padding:0;border:0;height:1px;width:1px;overflow:hidden}
+.katex .base{position:relative;display:inline-block}
+.katex .strut{display:inline-block}
+.katex .mord,.katex .mop,.katex .mbin,.katex .mrel,.katex .mopen,.katex .mclose,.katex .mpunct,.katex .mminner,.katex .mfrac,.katex .msupsub,.katex .mstack,.katex .mtable{display:inline-block;position:relative}
+.katex .mbin{margin-right:.2222221333em}
+.katex .mrel{margin-left:.2777778333em}
+.katex .mopen{margin-right:.2777778333em}
+.katex .mclose{margin-left:.2777778333em}
+.katex .mpunct{margin-left:.1111111333em;margin-right:.1111111333em}
+.katex .mfrac{margin:0 .1111111333em}
+.katex .minner{vertical-align:middle}
+.katex .mfrac .frac-line{display:block;width:100%}
+.katex .sqrt{display:inline-block}
+.katex .sqrt-sign{position:relative}
+.katex .sqrt .overline-line{display:block;width:100%}
+.katex .msubsup,.katex .msub,.katex .msup{display:inline-block}
+.katex .sup{text-align:right;font-size:0.75em}
+.katex .sub{text-align:left;font-size:0.75em}
+.katex .overline .overline-line{display:block;width:100%}
+.katex .underline .underline-line{display:block;width:100%}
+.katex .delimitercenter{display:inline-block;vertical-align:middle}
+.katex .frac-line{display:block}
+.katex .arraycolsep{display:inline-block}
+.katex .delimsizing,.katex .nulldelimiter{display:inline-block}
+.katex .nolim{display:inline}
+.katex .mop::after{content:none}
+.katex .rule{display:inline-block;border:solid 0}
