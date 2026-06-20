@@ -2,7 +2,7 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {

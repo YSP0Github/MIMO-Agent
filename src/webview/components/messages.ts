@@ -616,7 +616,7 @@ export const Messages = {
                 if (card) card.classList.toggle('expanded');
             }
 
-            // URL link click 鈫?open in browser
+            // URL link click -> open in browser
             const link = (e.target as HTMLElement).closest('a.url-link') as HTMLAnchorElement | null;
             if (link && link.href) {
                 e.preventDefault();
@@ -1013,17 +1013,17 @@ export const Messages = {
     /**
      * Deduplicate repeated phrases in reasoning text.
      * Detects when the same phrase repeats 3+ times consecutively
-     * and collapses it to "脳N" notation.
+     * and collapses it to "×N" notation.
      */
     _dedupReasoning(text: string): string {
         return dedupMessageReasoning(text);
-        // Pass 1: Match 3+ consecutive identical multi-line blocks (each line 鈮?200 chars)
+        // Pass 1: Match 3+ consecutive identical multi-line blocks (each line <= 200 chars)
         let result = text.replace(
             /((?:[^\n]{1,200}\n?){1,3})\1{2,}/g,
             (_match: string, phrase: string) => {
                 const trimmed = phrase.replace(/\n+$/, '');
                 const count = Math.ceil(_match.length / phrase.length);
-                return trimmed + ` 脳${count}\n`;
+                return trimmed + ` ×${count}\n`;
             }
         );
         // Skip expensive passes for very long text (performance guard)
@@ -1033,15 +1033,15 @@ export const Messages = {
                 const regex = new RegExp(`(.{${size}})\\1{2,}`, 'g');
                 const newResult = result.replace(regex, (match: string, phrase: string) => {
                     const count = Math.round(match.length / phrase.length);
-                    return phrase + ` 脳${count}`;
+                    return phrase + ` ×${count}`;
                 });
                 if (newResult !== result) { result = newResult; break; }
             }
             // Pass 3: Flexible-length consecutive repeats (catches non-aligned patterns)
-            // e.g. "鎬濊€冩€濊€冩€濊€?.." or "Let me think.Let me think.Let me think."
+            // e.g. repeated Chinese or English phrases such as "Let me think."
             result = result.replace(/(.{20,}?)\1{2,}/g, (match: string, phrase: string) => {
                 const count = Math.round(match.length / phrase.length);
-                return phrase + ` 脳${count}`;
+                return phrase + ` ×${count}`;
             });
         }
         return result;
@@ -1068,7 +1068,7 @@ export const Messages = {
         smartScroll(messagesDiv);
         return;
 
-        // execute_command 鈫?card-style layout with IN/OUT
+        // execute_command -> card-style layout with IN/OUT
         if (name === 'execute_command') {
             const card = createElement('div', 'tool-card');
             card.setAttribute('data-status', 'running');
@@ -1213,7 +1213,7 @@ export const Messages = {
         const toolName = (last as any)._toolName as string;
         const toolArgs = (last as any)._toolArgs as any;
 
-        // edit_file 鈫?compact diff card
+        // edit_file -> compact diff card
         if (toolName === 'edit_file' && toolArgs && (toolArgs.old_text || toolArgs.new_text)) {
             const diffCard = this.createDiffCard(toolArgs);
             if (diffCard) {
@@ -1222,14 +1222,14 @@ export const Messages = {
             }
         }
 
-        // git_diff 鈫?compact diff card
+        // git_diff -> compact diff card
         if (toolName === 'git_diff' && result && result !== 'No changes') {
             const diffCard = this.createDeferredGitDiffCard(result);
             last.after(diffCard);
             return;
         }
 
-        // execute_command 鈫?card-style: add OUT section
+        // execute_command -> card-style: add OUT section
         if (toolName === 'update_todos') {
             const todos = Array.isArray(toolArgs?.todos) ? toolArgs.todos : [];
             const items: TodoItem[] = todos
@@ -1309,7 +1309,7 @@ export const Messages = {
             `<div class="tool-header">` +
             `<div class="tool-icon-wrapper"><div class="tool-icon">GD</div><div class="tool-status-dot"></div></div>` +
             `<div class="tool-info"><span class="tool-name">git_diff</span><span class="tool-args">${fileCount} file${fileCount === 1 ? '' : 's'}, ${lineCount} lines</span></div>` +
-            `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
+            `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▼</span></div>` +
             `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the git diff.</span></div></div></div>`;
 
         const render = () => {
@@ -1422,7 +1422,7 @@ export const Messages = {
         card.innerHTML = `<div class="diff-card-header">` +
             `<span class="diff-file">${escapeHtml(filePath)}</span>` +
             `<span class="diff-stats">${added} lines added, ${removed} lines removed</span>` +
-            `<span class="diff-chevron">鈻?/span>` +
+            `<span class="diff-chevron">▼</span>` +
             `</div><div class="diff-card-body"></div>`;
 
         const body = card.querySelector('.diff-card-body') as HTMLElement;
@@ -2520,7 +2520,7 @@ export const Messages = {
         const lastUserMsg = store.get('lastUserMsg');
         if (lastUserMsg) {
             const retryBtn = createElement('button', 'retry-btn');
-            retryBtn.textContent = '鈫?Retry';
+            retryBtn.textContent = '→ Retry';
             retryBtn.addEventListener('click', () => {
                 const { text, images } = lastUserMsg;
                 store.set('lastUserMsg', null);
@@ -3344,7 +3344,7 @@ export const Messages = {
             card.innerHTML = `<div class="tool-header">` +
                 `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
                 `<div class="tool-info"><span class="tool-name">edit_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▼</span></div>` +
                 `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the edit preview.</span></div></div>` +
                 `<div class="edit-preview-actions"><button class="edit-accept-btn">Accept</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3475,7 +3475,7 @@ export const Messages = {
                 card.innerHTML = `<div class="tool-header">` +
                     `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
                     `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-                    `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
+                    `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▼</span></div>` +
                     `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the overwrite preview.</span></div></div>` +
                     `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3543,7 +3543,7 @@ export const Messages = {
             card.innerHTML = `<div class="tool-header">` +
                 `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
                 `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)} (${linesLite.length} lines)</span></div>` +
-                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▼</span></div>` +
                 `</div><div class="tool-body"><div class="tool-result">${contentHtmlLite}</div>` +
                 `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3571,7 +3571,7 @@ export const Messages = {
     addSystemMessage(text: string, variant: 'default' | 'manual-stop' = 'default'): void {
         const messagesDiv = document.getElementById('messages')!;
         const sys = createElement('div', 'msg msg-system');
-        const normalizedVariant = variant === 'default' && /^(宸叉墜鍔ㄥ仠姝㈠綋鍓嶄换鍔°€倈Stopped this task manually\.)$/.test(String(text || '').trim())
+        const normalizedVariant = variant === 'default' && /^(已手动停止当前任务。|Stopped this task manually\.)$/.test(String(text || '').trim())
             ? 'manual-stop'
             : variant;
         if (normalizedVariant !== 'default') {
@@ -3769,7 +3769,7 @@ export const Messages = {
         card.querySelectorAll('.ask-user-option-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (btn.getAttribute('data-other') === 'true') {
-                    // Show inline input for "鍏朵粬"
+                    // Show inline input for "其他"
                     otherInput.style.display = 'flex';
                     input.focus();
                 } else {
@@ -3876,7 +3876,7 @@ export const Messages = {
             nameEl.textContent = displayName;
             nameEl.style.color = persona === 'programmer' ? '#FF6900' : '#2196F3';
             const phaseEl = createElement('span', 'adversarial-phase');
-            phaseEl.textContent = phase === 'speak' ? '姝ｅ湪缂栫爜...' : phase === 'review' ? '姝ｅ湪瀹℃煡...' : phase === 'verdict' ? '瑁佸喅' : '';
+            phaseEl.textContent = phase === 'speak' ? '正在编码...' : phase === 'review' ? '正在审查...' : phase === 'verdict' ? '裁决' : '';
             header.appendChild(avatar);
             header.appendChild(nameEl);
             const roundEl = createElement('span', 'adversarial-round');
@@ -3906,7 +3906,7 @@ export const Messages = {
         // Update phase text if it changed
         const phaseEl = this._currentAdversarialBlock?.querySelector('.adversarial-phase');
         if (phaseEl) {
-            const phaseText = phase === 'speak' ? '姝ｅ湪缂栫爜...' : phase === 'review' ? '姝ｅ湪瀹℃煡...' : phase === 'verdict' ? '瑁佸喅' : '';
+            const phaseText = phase === 'speak' ? '正在编码...' : phase === 'review' ? '正在审查...' : phase === 'verdict' ? '裁决' : '';
             (phaseEl as HTMLElement).textContent = phaseText;
         }
 
