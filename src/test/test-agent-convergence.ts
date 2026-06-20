@@ -1,4 +1,6 @@
 import { describe, it, expect, summary } from './test-runner';
+import * as fs from 'fs';
+import * as path from 'path';
 import { MiMoAgent } from '../agent';
 import { MiMoConfig } from '../config';
 import { ConversationState } from '../agentTypes';
@@ -210,6 +212,79 @@ describe('agent convergence guards', () => {
         );
 
         expect(decision.shouldContinue).toBe(false);
+    });
+
+    it('stops Auto mode for completed planning-only delivery that waits for user choice', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: '我想用网页实现该游戏，你能给我个实现方案吗？难点在哪' },
+        ]);
+
+        const decision = agent.shouldContinueAutoAfterTextFinal(
+            conv,
+            'complex',
+            [
+                '任务完成总结',
+                '',
+                '任务类型：方案分析（纯规划，无代码修改）',
+                '已交付：',
+                '- 视频分析：识别为手机休闲消除游戏录屏',
+                '- 技术方案：单文件 HTML + Canvas 2D',
+                '- 难点清单：弧形轨道、发射弹道、颜色匹配消除',
+                '- 开发路线：5 步渐进开发',
+                '',
+                '文件变更：无（纯分析任务，未修改任何文件，无需文件级验证）。',
+                '下一步：等待老板指示，A. 直接开始实现 或 B. 调整方案。',
+            ].join('\n'),
+            1,
+            600,
+        );
+
+        expect(decision.shouldContinue).toBe(false);
+    });
+
+    it('names saved planning summaries from the user task instead of assistant chatter', () => {
+        const agent = makeAgent();
+        const filename = (agent as any).buildSummaryFilename(
+            [
+                '好的，我已经有足够的项目上下文了。你的工作区已有多个单文件 HTML5 Canvas 游戏。',
+                '',
+                '## 技术实现方案',
+                '- Canvas 2D',
+                '- 发射系统',
+            ].join('\n'),
+            '我想用网页实现一个类似泡泡龙/祖玛的小游戏。请只做方案分析，不要修改任何文件。',
+        );
+
+        expect(filename).toContain('mimo-plan-');
+        expect(filename).toContain('泡泡龙-祖玛');
+        expect(filename.includes('好的')).toBe(false);
+        expect(filename).toMatch(/\.md$/);
+    });
+
+    it('uses a Chinese saved-copy label for Chinese long summaries', () => {
+        const agent = makeAgent();
+        const events = {
+            onReasoning: () => {},
+        } as any;
+        const longSummary = [
+            '任务完成总结',
+            '',
+            '## 技术实现方案',
+            ...Array.from({ length: 140 }, (_, i) => `- 第 ${i + 1} 项：方案分析内容，保持中文上下文用于测试另存提示。`),
+        ].join('\n');
+
+        const result = (agent as any).maybeSaveLongFinalResponse(
+            longSummary,
+            events,
+            '我想用网页实现一个类似泡泡龙/祖玛的小游戏。请只做方案分析。',
+        );
+        const saved = String(result).match(/已另存为: (.+\.md)/)?.[1];
+
+        expect(result).toContain('已另存为: mimo-plan-');
+        expect(result).toContain('泡泡龙-祖玛');
+        if (saved)
+            fs.rmSync(path.join(process.cwd(), saved), { force: true });
     });
 
     it('recognizes Chinese delivery summaries as finalizable', () => {

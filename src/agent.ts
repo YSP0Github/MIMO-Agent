@@ -504,31 +504,68 @@ export class MiMoAgent extends EventEmitter {
         const hasRiskOrNext = /(next|risk|warning|recommend|follow-up|下一步|风险|注意事项|建议|后续)/i.test(clean);
         return hasDone && hasFile && (hasStats || hasRiskOrNext);
     }
-    private buildSummaryFilename(response: string): string {
-        const firstHeading = response
+    private inferSavedResponseKind(response: string, titleSource = ''): string {
+        const text = `${titleSource}\n${response}`;
+        if (/(方案|规划|路线|步骤|技术实现|开发计划|plan|planning|roadmap|proposal)/i.test(text))
+            return 'mimo-plan';
+        if (/(review|audit|findings|审查|评审|审计|风险)/i.test(text))
+            return 'mimo-review';
+        if (/(report|analysis|分析|报告)/i.test(text))
+            return 'mimo-report';
+        return 'mimo-summary';
+    }
+    private extractSavedResponseTitle(source: string): string {
+        const raw = String(source || '');
+        const lines = raw
             .split(/\r?\n/)
-            .map(line => line.replace(/^#{1,6}\s+/, '').trim())
-            .find(line => line.length >= 4 && !line.startsWith('```'));
-        const base = (firstHeading || 'mimo-summary')
-            .replace(/[<>:"/\\|?*\x00-\x1f]/g, '')
+            .map(line => line
+            .replace(/^#{1,6}\s+/, '')
+            .replace(/^\s*(?:[-*]|\d+[.)]|[一二三四五六七八九十]+[、.])\s*/, '')
+            .replace(/`+/g, '')
+            .replace(/&#\d+;/g, '')
+            .trim())
+            .filter(line => line.length >= 4
+            && !line.startsWith('```')
+            && !/^\|/.test(line)
+            && !/^(copy saved|saved copy|已另存为|另存为)[:：]/i.test(line)
+            && !/^(好的|好，|老板|当然|下面|以下|我已经|我已|先说结论|总结一下)/i.test(line));
+        const first = lines[0] || '';
+        return first
+            .split(/[。！？!?；;\n]/)[0]
+            .replace(/^(?:请|麻烦|帮我|给我|我想|我需要|能不能|可以|请你|麻烦你|老板[，,]?)\s*/i, '')
+            .replace(/(?:请只做|只做|不要修改任何文件|不要写代码|分析完成后等待我确认下一步|告诉我|请告诉我)[:：，,。]*/gi, '')
+            .trim();
+    }
+    private normalizeSavedFilenamePart(value: string): string {
+        return String(value || '')
+            .replace(/[<>:"\\|?*\x00-\x1f]/g, '')
+            .replace(/[\/]+/g, '-')
+            .replace(/[，,、。！？!；;：:\[\]【】（）(){}]+/g, ' ')
             .replace(/\s+/g, '-')
-            .slice(0, 40)
-            .replace(/^-+|-+$/g, '') || 'mimo-summary';
+            .replace(/-+/g, '-')
+            .slice(0, 48)
+            .replace(/^-+|-+$/g, '');
+    }
+    private buildSummaryFilename(response: string, titleSource = ''): string {
+        const kind = this.inferSavedResponseKind(response, titleSource);
+        const title = this.normalizeSavedFilenamePart(this.extractSavedResponseTitle(titleSource) || this.extractSavedResponseTitle(response));
+        const base = title ? `${kind}-${title}` : kind;
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         return `${base}-${stamp}.md`;
     }
-    private maybeSaveLongFinalResponse(response: string, events: AgentEvents): string {
+    private maybeSaveLongFinalResponse(response: string, events: AgentEvents, titleSource = ''): string {
         const clean = (response || '').trim();
         if (clean.length < 3000 && !this.isSubstantialFinalReport(clean))
             return response;
-        if (/Saved copy:\s+.+\.md|Copy saved:\s+.+\.md/i.test(clean))
+        if (/Saved copy:\s+.+\.md|Copy saved:\s+.+\.md|已另存为[:：]\s+.+\.md/i.test(clean))
             return response;
         try {
-            const filename = this.buildSummaryFilename(clean);
+            const filename = this.buildSummaryFilename(clean, titleSource);
             const target = path.join(this.config.workspace, filename);
             fs.writeFileSync(target, clean.endsWith('\n') ? clean : `${clean}\n`, 'utf-8');
             events.onReasoning(`[Summary] Long final response saved to ${filename}.`);
-            return `${clean}\n\nCopy saved: ${filename}`;
+            const savedLabel = /[\u4e00-\u9fff]/.test(clean) ? '已另存为' : 'Copy saved';
+            return `${clean}\n\n${savedLabel}: ${filename}`;
         }
         catch (e: any) {
             events.onReasoning(`[Summary] Failed to save long final response: ${String(e?.message || e).slice(0, 160)}`);
@@ -1961,7 +1998,7 @@ Updated summary:`;
     }
     private finishWithLocalSummary(conv: ConversationState, userInput: string, summary: string, events: AgentEvents, toolObservations: ToolObservation[], convId: string, traceType: string, traceData: Record<string, any> = {}): string {
         const summaryWithArtifacts = this.appendMissingArtifactSummary(conv, summary);
-        const finalOutput = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events);
+        const finalOutput = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events, userInput);
         conv.messages.push({ role: 'assistant', content: finalOutput, reasoning_content: '' } as any);
         this.saveConversations();
         this.traceEvent(conv, traceType, {
@@ -2387,11 +2424,21 @@ Change strategy now:
         if (!text.trim())
             return false;
         const lower = text.toLowerCase();
-        const saysNoChanges = /(read-?only analysis|no changes were made|did not modify|not modify|analysis only|pure analysis)/i.test(text);
-        const isAnalysisStyle = /(analysis|review|audit|inspection|explain)/i.test(text);
+        const saysNoChanges = /(read-?only analysis|no changes were made|no file changes|did not modify|not modify|analysis only|pure analysis|planning only|no validation needed|无需(?:文件级)?验证|无(?:代码|文件)?(?:修改|变更)|未(?:修改|变更|写入|创建)任何文件|没有(?:代码|文件)?(?:修改|变更)|纯(?:分析|规划|方案))/i.test(text);
+        const isAnalysisStyle = /(analysis|review|audit|inspection|explain|plan|planning|roadmap|方案|规划|分析|审查|评审|难点|路线)/i.test(text);
         const avoidsAction = !this.isUnexecutedActionStatement(text);
         const avoidsChangeClaims = !/(changed|modified|updated|implemented|fixed|created|wrote|edited)/i.test(lower);
         return saysNoChanges && isAnalysisStyle && avoidsAction && avoidsChangeClaims;
+    }
+    private isPlanningOrAnalysisDelivery(finalText: string): boolean {
+        const text = String(finalText || '').trim();
+        if (text.length < 80)
+            return false;
+        const hasCompletion = /(done|completed|final summary|task completed|finished|delivered|已完成|任务完成|完成总结|交付完成|已交付|处理完成)/i.test(text);
+        const hasPlanningDeliverable = /(analysis|plan|planning|roadmap|proposal|architecture|design|difficulty|risk|trade-?off|方案|规划|分析|架构|设计|难点|清单|路线|步骤|技术方案|开发路线)/i.test(text);
+        const saysNoChangesOrValidationNeeded = /(read-?only analysis|no changes were made|no file changes|did not modify|not modify|analysis only|pure analysis|planning only|no validation needed|无需(?:文件级)?验证|无(?:代码|文件)?(?:修改|变更)|未(?:修改|变更|写入|创建)任何文件|没有(?:代码|文件)?(?:修改|变更)|纯(?:分析|规划|方案))/i.test(text);
+        const waitsForUserDecision = /(waiting for|wait(?:ing)? for your|choose|confirm|which option|next step|等待(?:老板|用户|你|您)?(?:确认|指示|决定|选择|下一步)|等(?:老板|用户|你|您).{0,24}(?:确认|选择|指示|决定)|请选择|选哪个|选哪一个|直接开始|调整方案|开工实现)/i.test(text);
+        return hasCompletion && hasPlanningDeliverable && (saysNoChangesOrValidationNeeded || waitsForUserDecision);
     }
     private hasExplicitChangeClaim(text: string): boolean {
         const lower = String(text || '').toLowerCase();
@@ -2407,6 +2454,8 @@ Change strategy now:
         if (taskComplexity === 'simple')
             return { shouldContinue: false, reason: '' };
         if (round >= hardMaxRounds)
+            return { shouldContinue: false, reason: '' };
+        if (this.isPlanningOrAnalysisDelivery(finalText) || this.isReadOnlyAnalysisFinal(finalText))
             return { shouldContinue: false, reason: '' };
         const recentTools = conv.messages.slice(-50).filter(msg => msg.role === 'tool');
         const hasExploration = this.hasRecentTool(conv, [
@@ -2447,7 +2496,7 @@ Change strategy now:
         const trimmed = this.extractMessageText(text).trim();
         if (!trimmed)
             return false;
-        if (this.isDeliverySummary(trimmed) || this.isSubstantialFinalReport(trimmed))
+        if (this.isDeliverySummary(trimmed) || this.isSubstantialFinalReport(trimmed) || this.isPlanningOrAnalysisDelivery(trimmed))
             return false;
         if (this.isRawShellCommandDraft(trimmed))
             return true;
@@ -2477,6 +2526,8 @@ Change strategy now:
         if (conv.mode !== 'auto')
             return { shouldContinue: false, reason: '' };
         if (round >= hardMaxRounds)
+            return { shouldContinue: false, reason: '' };
+        if (this.isPlanningOrAnalysisDelivery(finalText) || this.isReadOnlyAnalysisFinal(finalText))
             return { shouldContinue: false, reason: '' };
         const recentTools = conv.messages.slice(-40).filter(msg => msg.role === 'tool');
         if (this.isUnexecutedActionStatement(finalText)) {
@@ -3679,7 +3730,7 @@ ${friendlyError}`;
                     elapsedMs: Date.now() - chatStartedAt,
                     responseChars: finalWithArtifacts.length,
                 });
-                const finalOutput = this.maybeSaveLongFinalResponse(finalWithArtifacts, events);
+                const finalOutput = this.maybeSaveLongFinalResponse(finalWithArtifacts, events, userInput);
                 if (finalOutput !== finalResponse) {
                     const last = conv.messages[conv.messages.length - 1];
                     if (last?.role === 'assistant') {
@@ -4055,7 +4106,7 @@ ${friendlyError}`;
         });
         const finalSummary = await this.finalizeWithFreshModel(conv, progressSummary, events, signal);
         const summaryWithArtifacts = this.appendMissingArtifactSummary(conv, finalSummary || progressSummary);
-        const summary = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events);
+        const summary = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events, userInput);
         conv.messages.push({ role: 'assistant', content: summary });
         this.saveConversations();
         this.traceEvent(conv, 'chat.handoff', {

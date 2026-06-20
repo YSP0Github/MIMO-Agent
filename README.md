@@ -35,7 +35,7 @@ MiMo Agent 是一个运行在 VS Code 内的本地 AI 编程助手。它可以�
 
 如果 MiMo Agent 使用体验觉得还不错的朋友，希望能点个小星星⭐哦！🙏
 
-当前版本：`v1.7.6`。
+当前版本：`v1.7.8`。
 
 ## ✨ 当前核心能力
 
@@ -363,6 +363,12 @@ npm run compile
 
 详细版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
+`v1.7.8` 重点：
+
+- 修复纯方案/规划/分析任务已经交付并等待用户确认时，Auto 模式仍继续触发验证补充和重复完成总结的问题。
+- 长方案自动另存文件名现在优先从用户需求生成，例如 `mimo-plan-*`，不再使用助手寒暄句作为文件名。
+- 中文长回复自动另存提示改为 `已另存为:`。
+
 `v1.7.6` 重点：
 
 - 新增 AI 电脑管家工具：多 Agent 任务编排系统，支持代码、文件、系统、浏览器四类 Agent 自动调度。
@@ -411,14 +417,19 @@ npm run compile
 
 MiMo Agent is a local AI coding assistant for VS Code. It can inspect your workspace, search code, edit files, run commands, review Git diffs, manage long-running tasks, and call Xiaomi MiMo, DeepSeek, OpenAI, or custom OpenAI-compatible endpoints.
 
-Current version: `v1.7.6`.
+Current version: `v1.7.8`.
+
+## 1.7.8 Highlights
+
+- Fixed Auto mode continuing into extra verification after planning-only analysis had already been delivered and was waiting for user confirmation.
+- Long saved planning summaries now use task-derived filenames such as `mimo-plan-*` instead of assistant chatter.
+- Chinese long-response save notices now use `已另存为:`.
 
 ## 1.7.6 Highlights
 
-- Added quick project-file references in the input box with `#` and the `+` button; selected files render as inline tokens and are sent as full paths.
-- Fixed MiMo multi-turn tool continuation by preserving required `reasoning_content`, preventing provider-side 400 request-format failures.
-- Improved history Thought replay, input-history restore, Diff counting, stale Diff cards, and long-output rendering performance.
-- User-facing thinking messages no longer expose internal protocol fields; live runs hide long drafts while history can still expand saved process details.
+- Added the AI Butler tool: a local multi-agent task orchestration system for code, file, system, and browser agents.
+- Fixed Webview message encoding issues and added safer message-copy type checks.
+- Added task-change edit counts and confirmation-input i18n keys.
 
 ## 1.7.4 Highlights
 

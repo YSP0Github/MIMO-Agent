@@ -23,6 +23,8 @@ build-webview.mjs
 releases/
 docs/reports/**
 docs/images/**
+docs/*-2026-*.md
+docs/**/*-2026-*.md
 docs/USER_FEEDBACK_PLAN.md
 docs/MIMO_PLATFORM_GUIDE.md
 docs/fix-first-response-interruption.md
