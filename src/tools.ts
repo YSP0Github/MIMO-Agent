@@ -776,6 +776,20 @@ function atomicWriteTextFile(fullPath: string, content: string): void {
     }
 }
 
+export function writeTextFileWithGuards(fullPath: string, displayPath: string, content: string, workspace: string): {
+    bytes: number;
+    backupNote: string;
+} {
+    if (isSensitiveFile(displayPath || fullPath)) {
+        throw new Error(`Cannot write sensitive file: ${displayPath || fullPath}`);
+    }
+
+    const bytes = ensureWritePayloadSize(content, displayPath || fullPath);
+    const backupNote = backupExternalPathIfNeeded(fullPath, workspace, 'write_file');
+    atomicWriteTextFile(fullPath, content);
+    return { bytes, backupNote };
+}
+
 function isInsideWorkspace(filePath: string, workspace: string): boolean {
     const rel = path.relative(path.resolve(workspace), path.resolve(filePath));
     return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
@@ -928,11 +942,8 @@ async function toolWriteFile(args: Record<string, any>, workspace: string): Prom
         const full = resolvePath(args.path, workspace);
         const { safe, reason } = isPathSafe(full, workspace);
         if (!safe) return `Safety: ${reason}`;
-        if (isSensitiveFile(args.path)) return `Safety: Cannot write sensitive file: ${args.path}`;
 
-        const bytes = ensureWritePayloadSize(content, args.path || full);
-        const backupNote = backupExternalPathIfNeeded(full, workspace, 'write_file');
-        atomicWriteTextFile(full, content);
+        const { bytes, backupNote } = writeTextFileWithGuards(full, args.path || full, content, workspace);
         return `Written ${args.path} (${content.length} chars, ${content.split('\n').length} lines, ${bytes} bytes)${backupNote}`;
     } catch (error: any) {
         return `Tool error: ${error?.message || String(error)}`;

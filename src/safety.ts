@@ -112,6 +112,18 @@ const SENSITIVE_EXTENSIONS = new Set([
     '.pfx', '.keystore', '.credentials', '.token',
 ]);
 
+const MAX_SHELL_GENERATED_FILE_BYTES = 6 * 1024 * 1024;
+
+const LARGE_FILE_WRITE_PATTERNS: RegExp[] = [
+    /\[System\.IO\.File\]::WriteAll(Text|Bytes)/i,
+    /\b(Set-Content|Add-Content|Out-File)\b/i,
+    /\bfsutil\s+file\s+createnew\b/i,
+    /\bSetLength\s*\(/i,
+    /\btruncate\s+-s\b/i,
+    /\bfallocate\b/i,
+    /\bFileStream\b/i,
+];
+
 // ── System drive protection ──
 
 /**
@@ -297,6 +309,72 @@ function checkPipeSafety(cmd: string): { safe: boolean; reason?: string } {
     return { safe: true };
 }
 
+function parseExplicitSizeToken(token: string): number | null {
+    const normalized = token.trim().toLowerCase().replace(/\s+/g, '');
+    const unitMatch = normalized.match(/^(\d+(?:\.\d+)?)(kb|mb|gb|b)$/i);
+    if (unitMatch) {
+        const value = Number(unitMatch[1]);
+        const unit = unitMatch[2].toLowerCase();
+        const multiplier = unit === 'gb'
+            ? 1024 * 1024 * 1024
+            : unit === 'mb'
+                ? 1024 * 1024
+                : unit === 'kb'
+                    ? 1024
+                    : 1;
+        return Math.round(value * multiplier);
+    }
+    if (/^\d+$/.test(normalized)) {
+        return Number(normalized);
+    }
+    return null;
+}
+
+function extractExplicitByteSizes(cmd: string): number[] {
+    const sizes: number[] = [];
+    const addSize = (value: number | null) => {
+        if (value !== null && Number.isFinite(value) && value > 0) {
+            sizes.push(value);
+        }
+    };
+
+    for (const match of cmd.matchAll(/\b\d+(?:\.\d+)?\s*(?:kb|mb|gb|b)\b/gi)) {
+        addSize(parseExplicitSizeToken(match[0]));
+    }
+
+    for (const match of cmd.matchAll(/\b(\d+(?:\.\d+)?)\s*\*\s*1024\s*\*\s*1024(?:\s*\*\s*1024)?\b/gi)) {
+        const factor = Number(match[1]);
+        const hasGigabyteTerm = /\*\s*1024\s*\*\s*1024\s*\*\s*1024/i.test(match[0]);
+        addSize(Math.round(factor * (hasGigabyteTerm ? 1024 * 1024 * 1024 : 1024 * 1024)));
+    }
+
+    for (const match of cmd.matchAll(/\b1\.\.\s*(\d{7,})\b/g)) {
+        addSize(Number(match[1]));
+    }
+
+    for (const match of cmd.matchAll(/\b(?:createnew|SetLength)\s*\(?\s*["']?[^"'\r\n]*?["']?\s*,?\s*(\d{7,})\b/gi)) {
+        addSize(Number(match[1]));
+    }
+
+    return sizes;
+}
+
+function checkLargeFileGeneration(cmd: string): { safe: boolean; reason?: string } {
+    if (!LARGE_FILE_WRITE_PATTERNS.some((pattern) => pattern.test(cmd))) {
+        return { safe: true };
+    }
+
+    const sizes = extractExplicitByteSizes(cmd);
+    if (!sizes.some((size) => size >= MAX_SHELL_GENERATED_FILE_BYTES)) {
+        return { safe: true };
+    }
+
+    return {
+        safe: false,
+        reason: 'Blocking shell-based generation of oversized files; prefer a smaller structured test file.',
+    };
+}
+
 /**
  * Check if a URL targets internal/private network (SSRF protection).
  */
@@ -367,6 +445,11 @@ export function isCommandSafe(cmd: string, workspace?: string): SafetyResult {
     const ssrfCheck = checkSSRF(cmd);
     if (!ssrfCheck.safe) {
         return { blocked: true, needsConfirm: false, reason: ssrfCheck.reason! };
+    }
+
+    const largeFileCheck = checkLargeFileGeneration(cmd);
+    if (!largeFileCheck.safe) {
+        return { blocked: true, needsConfirm: false, reason: largeFileCheck.reason! };
     }
 
     // 4. Extract and check shell -c inner commands (recursive)

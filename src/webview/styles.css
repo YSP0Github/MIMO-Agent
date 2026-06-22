@@ -118,6 +118,7 @@ body{font-family:'Inter',var(--vscode-font-family);font-size:var(--vscode-font-s
 .msg-image-note{font-size:11px;color:var(--vscode-descriptionForeground);margin:2px 0 4px}
 .msg-assistant{padding:6px 0;font-size:13px;line-height:1.62;color:var(--vscode-foreground)}
 .msg-assistant .md-content{margin:6px 0}
+.msg-assistant .md-content-stream-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
 .msg-assistant .md-content:first-child{margin-top:0}
 .msg-assistant .md-content-final{margin-top:10px}
 .msg-assistant .md-content-verification{margin:10px 0 8px;padding:8px 11px 8px 13px;border-left:3px solid var(--mimo-orange);border-radius:6px;background:rgba(255,105,0,.08);color:var(--vscode-foreground)}
@@ -429,6 +430,7 @@ body{font-family:'Inter',var(--vscode-font-family);font-size:var(--vscode-font-s
 .file-search-popup.show{display:flex;flex-direction:column}
 .file-search-input{width:100%;padding:6px 8px;border:1px solid rgba(255,255,255,.08);border-radius:6px;background:var(--vscode-input-background);color:var(--vscode-foreground);font-size:12px;font-family:var(--vscode-font-family);outline:none;margin-bottom:4px;box-sizing:border-box}
 .file-search-input:focus{border-color:var(--mimo-orange)}
+.file-search-summary{padding:2px 8px 6px;color:var(--vscode-descriptionForeground);font-size:11px;opacity:.82}
 .file-search-list{max-height:min(350px,calc(52vh - 46px));overflow-y:auto;padding:2px 0}
 .file-search-empty{padding:10px 12px;color:var(--vscode-descriptionForeground);font-size:12px;text-align:center}
 .file-search-loading{padding:10px 12px;color:var(--vscode-descriptionForeground);font-size:12px;text-align:center}

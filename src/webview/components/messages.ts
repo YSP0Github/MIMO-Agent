@@ -4,8 +4,13 @@
 import { store, ImageData } from '../core/store';
 import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
+import { renderMarkdown } from '../../markdown';
 import { escapeHtml, createElement } from '../utils/dom';
 import { getWelcomePair, t } from '../core/i18n';
+import {
+    looksLikeConfigOrApiError as looksLikeFriendlyConfigOrApiError,
+    renderFriendlyErrorHtml as renderStructuredFriendlyErrorHtml,
+} from './friendlyError';
 import { renderTaskChecklist, TodoItem } from './taskChecklist';
 import {
     EditedFileInfo as MessageEditedFileInfo,
@@ -116,7 +121,10 @@ const REASONING_PREVIEW_CHARS = 360;
 const REASONING_STORE_CHARS = 4000;
 const REASONING_DEDUP_INTERVAL_MS = 3000;
 const WORKFLOW_UPDATE_INTERVAL_MS = 400;
-const HISTORY_SNAPSHOT_MAX_HTML = 700_000;
+const HISTORY_SNAPSHOT_MAX_HTML = 450_000;
+const HISTORY_SNAPSHOT_MAX_NODES = 8;
+const HISTORY_SNAPSHOT_MAX_NODE_TEXT = 180_000;
+const HISTORY_SNAPSHOT_MAX_USER_HTML = 80_000;
 const HISTORY_PATCH_MAX_CHARS = 500_000;
 const QUEUE_VISIBLE_ITEMS = 3;
 const TASK_CHANGES_VISIBLE_FILES = 3;
@@ -301,13 +309,60 @@ function isRichErrorHtmlCandidate(html: string): boolean {
     return !/<(?:table|ul|ol|pre|code|details|blockquote|img|button|input|svg)\b/i.test(html);
 }
 
-function renderFriendlyErrorHtml(text: string): string {
+const FRIENDLY_ERROR_SECTION_LABELS = [
+    'Task status',
+    'Goal',
+    'Completed tool calls',
+    'Progress',
+    'Soft budget',
+    'Changed files',
+    'Latest model output',
+    'Recent tool results',
+    'Next action',
+    '问题归因',
+    '原因',
+    '建议',
+    '原始信息',
+    'Request summary',
+] as const;
+
+function normalizeFriendlyErrorLines(text: string): string[] {
+    const raw = String(text || '').trim();
+    if (!raw) return [];
+
+    let normalized = raw.replace(/\r\n/g, '\n');
+    const labels = FRIENDLY_ERROR_SECTION_LABELS
+        .map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+
+    normalized = normalized.replace(new RegExp(`\\s+(?=(?:${labels})\\s*[:：])`, 'g'), '\n');
+    normalized = normalized.replace(/\s+(?=MiMo API 返回\s+\d{3}|FAILED:)/g, '\n');
+
+    return normalized
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+}
+
+function getFriendlyErrorTitle(lines: string[]): string {
+    for (const line of lines) {
+        if (/^(?:Task status|Goal|Completed tool calls|Progress|Soft budget|Changed files|Latest model output|Recent tool results|Next action|问题归因|原因|建议|原始信息|Request summary)\s*[:：]/i.test(line)) {
+            continue;
+        }
+        if (/^(?:MiMo API 返回\s+\d{3}|FAILED:|Authentication failed|Request was aborted)/i.test(line)) {
+            return line;
+        }
+    }
+    return lines[0] || 'API / runtime error';
+}
+
+export function renderFriendlyErrorHtml(text: string): string {
     const raw = String(text || '').trim();
     if (!raw) return '';
 
     const code = extractErrorCode(raw);
-    const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    const title = lines[0] || 'API / runtime error';
+    const lines = normalizeFriendlyErrorLines(raw);
+    const title = getFriendlyErrorTitle(lines);
     const sections: string[] = [];
 
     const collectSection = (label: string) =>
@@ -361,6 +416,7 @@ function renderFriendlyErrorHtml(text: string): string {
     }
 
     const consumed = new Set<string>([
+        title,
         ...taskStatus.map(v => `Task status: ${v}`),
         ...reasons,
         ...suggestions,
@@ -400,8 +456,8 @@ function renderFriendlyErrorHtml(text: string): string {
 function formatAssistantBodyHtml(rawHtml: string): string {
     const sanitizedHtml = enhanceMessageTaskChecklists(stripMessageRawToolCalls(rawHtml || ''));
     const plainText = extractPlainTextFromHtml(sanitizedHtml);
-    if (plainText && isRichErrorHtmlCandidate(sanitizedHtml) && looksLikeConfigOrApiError(plainText)) {
-        return renderFriendlyErrorHtml(plainText);
+    if (plainText && isRichErrorHtmlCandidate(sanitizedHtml) && looksLikeFriendlyConfigOrApiError(plainText)) {
+        return renderStructuredFriendlyErrorHtml(plainText);
     }
     return sanitizedHtml;
 }
@@ -643,6 +699,8 @@ export const Messages = {
 
         // Listen for messages from host
         bus.on('userMessage', (text: string, images?: ImageData[] | null) => this.addUserMessage(text, images));
+        bus.on('streamDelta', (delta: string) => this.handleStreamDelta(delta));
+        bus.on('streamText', (text: string) => this.handleStreamText(text));
         bus.on('streamHtml', (html: string, lightweight?: boolean) => this.handleStream(html, !!lightweight));
         bus.on('assistantUpdate', (html: string) => this.handleAssistantUpdate(html));
         bus.on('verificationUpdate', (html: string) => this.handleVerificationUpdate(html));
@@ -749,6 +807,51 @@ export const Messages = {
     },
 
     // Streaming
+    getOrCreateStreamTextElement(): HTMLElement {
+        let streamingMsg = store.get('streamingMsg');
+
+        if (!streamingMsg) {
+            streamingMsg = this.createAssistantMsg();
+            const mc = createElement('div', 'md-content md-content-stream-text');
+            streamingMsg.appendChild(mc);
+            store.set('streamingMsg', streamingMsg);
+            store.set('rawHtml', '');
+        }
+
+        const sp = streamingMsg.querySelector('.spinner');
+        if (sp) sp.remove();
+
+        let el = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])') as HTMLElement | null;
+        if (!el) {
+            el = createElement('div', 'md-content md-content-stream-text');
+            streamingMsg.appendChild(el);
+        }
+        el.classList.add('md-content-stream-text');
+        return el;
+    },
+
+    handleStreamDelta(delta: string): void {
+        if (!delta) return;
+        const messagesDiv = document.getElementById('messages')!;
+        const el = this.getOrCreateStreamTextElement();
+        const previous = String((el as any)._lastStreamText || el.textContent || '');
+        const next = stripMessageRawToolCalls(previous + (delta || ''));
+        (el as any)._lastStreamText = next;
+        el.textContent = next;
+        store.set('rawHtml', next);
+        smartScroll(messagesDiv);
+    },
+
+    handleStreamText(text: string): void {
+        const messagesDiv = document.getElementById('messages')!;
+        const el = this.getOrCreateStreamTextElement();
+        if ((el as any)._lastStreamText === text) return;
+        (el as any)._lastStreamText = text;
+        el.textContent = stripMessageRawToolCalls(text || '');
+        store.set('rawHtml', text);
+        smartScroll(messagesDiv);
+    },
+
     handleStream(html: string, lightweight = false): void {
         const messagesDiv = document.getElementById('messages')!;
         let streamingMsg = store.get('streamingMsg');
@@ -781,8 +884,11 @@ export const Messages = {
             streamingMsg.appendChild(el);
         }
         if ((el as any)._lastStreamHtml === html) return;
+        const nextHtml = lightweight ? stripMessageRawToolCalls(html || '') : formatAssistantBodyHtml(html);
+        if ((el as any)._lastRenderedBodyHtml === nextHtml) return;
         (el as any)._lastStreamHtml = html;
-        el.innerHTML = lightweight ? stripMessageRawToolCalls(html || '') : formatAssistantBodyHtml(html);
+        (el as any)._lastRenderedBodyHtml = nextHtml;
+        el.innerHTML = nextHtml;
         smartScroll(messagesDiv);
     },
 
@@ -794,6 +900,16 @@ export const Messages = {
         if (!el.textContent?.trim() && !el.querySelector('*')) {
             el.remove();
             return;
+        }
+        if (el.classList.contains('md-content-stream-text')) {
+            const rawText = (el as any)._lastStreamText || el.textContent || '';
+            // Raw stream text is still markdown/plain text. Finalize it through the
+            // full markdown renderer so headings, tables, and checklists do not
+            // leak as literal `###`, `|`, or `- [ ]` text in the final bubble.
+            const rendered = renderMarkdown(rawText);
+            el.innerHTML = formatAssistantBodyHtml(rendered);
+            el.classList.remove('md-content-stream-text');
+            (el as any)._lastRenderedBodyHtml = el.innerHTML;
         }
         el.setAttribute('data-stream-finalized', 'true');
         el.classList.add('md-content-final');
@@ -837,9 +953,27 @@ export const Messages = {
             this.upsertVerificationSegment(html);
             return;
         }
+        const streamingMsg = store.get('streamingMsg');
+        const activeStream = streamingMsg?.querySelector('.md-content-stream-text:not([data-stream-finalized="true"])') as HTMLElement | null;
+        if (kind === 'final' && activeStream) {
+            const liveText = String((activeStream as any)._lastStreamText || activeStream.textContent || '').trim();
+            const finalHtml = formatAssistantBodyHtml(html || '');
+            const finalText = extractPlainTextFromHtml(finalHtml).trim();
+            if (!finalText || finalText === liveText || finalText.includes(liveText)) {
+                activeStream.innerHTML = finalHtml || formatAssistantBodyHtml(liveText);
+                activeStream.classList.remove('md-content-stream-text');
+                activeStream.setAttribute('data-stream-finalized', 'true');
+                activeStream.classList.add('md-content-final');
+                (activeStream as any)._lastRenderedBodyHtml = activeStream.innerHTML;
+                store.set('rawHtml', '');
+                this._markThinkingDone();
+                const messagesDiv = document.getElementById('messages')!;
+                smartScroll(messagesDiv);
+                return;
+            }
+        }
         this.handleStream(html || '');
         this.commitStreamSegment();
-        const streamingMsg = store.get('streamingMsg');
         const finalized = streamingMsg?.querySelector('.md-content-final:last-of-type') as HTMLElement | null;
         if (finalized) {
             finalized.classList.add(`md-content-${kind}`);
@@ -942,6 +1076,20 @@ export const Messages = {
             (thinkBlock as any)._dedupedText = '';
         }
         (thinkBlock as any)._reasoningText = nextReasoning;
+        if (!thinkBlock.classList.contains('show') && !(thinkBlock as any)._thinkingDone) {
+            const rawLen = nextReasoning.length;
+            const trimmed = !!(thinkBlock as any)._reasoningTrimmed;
+            const compactText = t('thinking.compact')
+                .replace('{count}', rawLen.toLocaleString())
+                .replace('{trimmed}', trimmed ? t('thinking.trimmed') : '');
+            if ((thinkBlock as any)._lastRenderedText !== compactText) {
+                thinkBlock.textContent = compactText;
+                (thinkBlock as any)._lastRenderedText = compactText;
+            }
+            const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
+            if (toggle) toggle.style.display = rawLen <= 30 ? 'none' : '';
+            return;
+        }
         this.renderThinkingBlock(thinkBlock, false, false);
     },
 
@@ -1804,10 +1952,18 @@ export const Messages = {
     },
 
     scheduleHistorySnapshot(elapsedSec?: number): void {
-        window.setTimeout(() => {
+        const capture = () => {
             const snapshot = this.captureLatestTurnSnapshot(elapsedSec);
             if (snapshot) vscode.historySnapshot(snapshot);
-        }, 80);
+        };
+        window.setTimeout(() => {
+            const requestIdle = (window as any).requestIdleCallback as ((cb: () => void, opts?: { timeout?: number }) => number) | undefined;
+            if (typeof requestIdle === 'function') {
+                requestIdle(capture, { timeout: 2500 });
+            } else {
+                window.setTimeout(capture, 800);
+            }
+        }, 250);
     },
 
     captureLatestTurnSnapshot(elapsedSec?: number): any | null {
@@ -1822,7 +1978,15 @@ export const Messages = {
         const userMessages = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-user'));
         const user = userMessages[userMessages.length - 1] || null;
         const snapshotNodes = this.collectLatestTurnSnapshotNodes(messagesDiv, assistant, user);
-        const html = snapshotNodes.map(node => node.outerHTML).join('\n');
+        let html = '';
+        for (const node of snapshotNodes) {
+            const textLen = (node.textContent || '').length;
+            if (textLen > HISTORY_SNAPSHOT_MAX_NODE_TEXT && !node.classList.contains('task-changes-card')) continue;
+            const outer = node.outerHTML;
+            if (outer.length > HISTORY_SNAPSHOT_MAX_HTML) continue;
+            if (html.length + outer.length + 1 > HISTORY_SNAPSHOT_MAX_HTML) break;
+            html += (html ? '\n' : '') + outer;
+        }
         if (!html || html.length > HISTORY_SNAPSHOT_MAX_HTML) return null;
         const userHtml = user?.outerHTML || '';
         const taskChanges = this.buildHistoryTaskChangeSnapshots(snapshotNodes);
@@ -1831,7 +1995,7 @@ export const Messages = {
             capturedAt: Date.now(),
             elapsedSec: typeof elapsedSec === 'number' ? Number(elapsedSec.toFixed(1)) : undefined,
             assistantHtml: html,
-            userHtml: userHtml.length < 200_000 ? userHtml : '',
+            userHtml: userHtml.length < HISTORY_SNAPSHOT_MAX_USER_HTML ? userHtml : '',
             taskChanges,
         };
     },
@@ -1844,12 +2008,13 @@ export const Messages = {
         while (next) {
             if (this.isLatestTurnSnapshotNode(next)) {
                 nodes.push(next);
+                if (nodes.length >= HISTORY_SNAPSHOT_MAX_NODES) break;
             }
             const following: Element | null = next.nextElementSibling;
             next = following instanceof HTMLElement ? following : null;
         }
         if (!nodes.includes(assistant)) nodes.unshift(assistant);
-        return nodes.filter((node, index) => nodes.indexOf(node) === index);
+        return nodes.filter((node, index) => nodes.indexOf(node) === index).slice(0, HISTORY_SNAPSHOT_MAX_NODES);
     },
 
     isLatestTurnSnapshotNode(node: HTMLElement): boolean {
@@ -1903,12 +2068,21 @@ export const Messages = {
         const streamingMsg = store.get('streamingMsg');
         if (!streamingMsg || streamingMsg.classList.contains('execution-compacted')) return;
 
-        const finalContents = Array.from(streamingMsg.querySelectorAll('.md-content-final:not(.md-content-update):not(.md-content-verification)')) as HTMLElement[];
-        const finalContent = [...finalContents]
+        const finalizedBodies = Array.from(streamingMsg.querySelectorAll('.md-content-final:not(.md-content-verification)')) as HTMLElement[];
+        let finalContent = [...finalizedBodies]
             .reverse()
-            .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;
-        for (const content of finalContents) {
-            if (content !== finalContent) content.classList.add('md-content-update');
+            .find(el => !el.classList.contains('md-content-update') && (!!el.textContent?.trim() || !!el.querySelector('*'))) || null;
+        if (!finalContent) {
+            finalContent = [...finalizedBodies]
+                .reverse()
+                .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;
+        }
+        for (const content of finalizedBodies) {
+            if (content === finalContent) {
+                content.classList.remove('md-content-update');
+            } else {
+                content.classList.add('md-content-update');
+            }
         }
 
         const detailNodes = Array.from(streamingMsg.children).filter((node) => {
@@ -2508,9 +2682,9 @@ export const Messages = {
 
         const messagesDiv = document.getElementById('messages')!;
         const err = createElement('div', 'msg-error');
-        if (looksLikeConfigOrApiError(error)) {
+        if (looksLikeFriendlyConfigOrApiError(error)) {
             err.classList.add('msg-error-rich');
-            err.innerHTML = renderFriendlyErrorHtml(error);
+            err.innerHTML = renderStructuredFriendlyErrorHtml(error);
         } else {
             const errText = createElement('span', 'error-text');
             errText.textContent = error;
@@ -3077,13 +3251,13 @@ export const Messages = {
             const bodyText = detail.type === 'reasoning'
                 ? sanitizeMessageReasoningForHistoryDisplay(String(detail.body || ''), false)
                 : String(detail.body || '').trim() || '(empty)';
-            const isFriendlyError = !!detail.isError && looksLikeConfigOrApiError(bodyText);
+            const isFriendlyError = !!detail.isError && looksLikeFriendlyConfigOrApiError(bodyText);
             const body = isFriendlyError
                 ? createElement('div', 'history-detail-body history-detail-body-rich')
                 : createElement('pre', 'history-detail-body');
             body.textContent = bodyText;
             if (isFriendlyError) {
-                body.innerHTML = renderFriendlyErrorHtml(bodyText);
+                body.innerHTML = renderStructuredFriendlyErrorHtml(bodyText);
             }
             if (detail.isError) item.classList.add('history-detail-error');
             item.appendChild(summary);

@@ -1,7 +1,9 @@
 import { describe, it, expect } from './test-runner';
 import { isRenderableImageDataUrl } from '../webview/components/messages/ChatBubble';
 import { sanitizeReasoningForDisplay, sanitizeReasoningForHistoryDisplay } from '../webview/components/messages/ThinkingBlock';
+import { renderFriendlyErrorHtml } from '../webview/components/friendlyError';
 import { renderTaskChecklist } from '../webview/components/taskChecklist';
+import { smartScroll } from '../webview/components/messages/shared';
 
 describe('webview chat bubble image handling', () => {
     it('accepts safe image data URLs for inline previews', () => {
@@ -65,5 +67,37 @@ describe('webview chat bubble image handling', () => {
         expect(html.includes('todo-priority')).toBe(true);
         expect(html.includes('P1')).toBe(true);
         expect(html.includes('P3')).toBe(true);
+    });
+
+    it('avoids duplicating flattened task status text in friendly error cards', () => {
+        const raw = 'Task status: task interrupted by API or runtime error Goal: 请继续完成上一条回复中未完成的任务，避免重复已经完成的步骤。 Completed tool calls: 17 Progress: round 1 (unlimited budget) Soft budget: unlimited Latest model output: 现在我已经充分理解了两个文件的内容。让我直接创建 markdown 文件： Next action: continue from the latest changed files or ask the model to verify and finalize. MiMo API 返回 400：生成参数不符合要求。 问题归因：更可能是 Agent 请求构造、参数配置或多轮协议拼接问题，不是大模型推理能力问题。 原因：请求 JSON、参数范围、模型名、消息格式或多模态输入不符合 MiMo API 要求。 建议：检查 JSON 格式、必需参数、参数范围和消息结构；确认模型名存在，并且当前接口支持该模型和图像/多模态输入。';
+        const html = renderFriendlyErrorHtml(raw);
+
+        expect(html.includes('friendly-error-title">MiMo API 返回 400')).toBe(true);
+        expect(html.includes('friendly-error-label">Task Status<')).toBe(true);
+        expect((html.match(/friendly-error-label">Task Status</g) || []).length).toBe(1);
+        expect(html.includes('friendly-error-title">Task status: task interrupted by API or runtime error')).toBe(false);
+    });
+});
+
+describe('webview performance guards', () => {
+    it('coalesces smartScroll calls onto the latest target', () => {
+        let rafCallback: ((time: number) => void) | null = null;
+        (globalThis as any).requestAnimationFrame = (cb: (time: number) => void) => {
+            rafCallback = cb;
+            return 1;
+        };
+
+        const a = { scrollHeight: 1000, scrollTop: 890, clientHeight: 100 } as any;
+        const b = { scrollHeight: 500, scrollTop: 390, clientHeight: 100 } as any;
+
+        smartScroll(a);
+        smartScroll(b);
+        if (rafCallback) {
+            (rafCallback as any)(0);
+        }
+
+        expect(a.scrollTop).toBe(890);
+        expect(b.scrollTop).toBe(500);
     });
 });

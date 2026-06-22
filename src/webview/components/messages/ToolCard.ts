@@ -165,7 +165,7 @@ export function getToolColor(name: string): string {
 }
 
 export function getFilePath(args: any): string {
-    return args.path || args.source || args.file || '';
+    return args.path || args.filePath || args.target || args.destination || args.dest || args.file || args.source || '';
 }
 
 export function getLineInfo(name: string, args: any): string {

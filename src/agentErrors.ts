@@ -1,6 +1,7 @@
 export interface FriendlyErrorOptions {
     model?: string;
     baseUrl?: string;
+    requestSummary?: string;
 }
 
 export interface MimoErrorCodeInfo {
@@ -34,11 +35,11 @@ export const MIMO_ERROR_CODES: Record<string, MimoErrorCodeInfo> = {
     '401': {
         code: '401',
         titleZh: '认证失败',
-        originZh: '更可能是用户配置或账号凭证问题，不是 Agent 执行逻辑或大模型推理问题。',
+        originZh: '更可能是用户配置或账户凭证问题，不是 Agent 执行逻辑或大模型推理问题。',
         reasonZh: 'API Key 缺失、无效，Authorization 请求头格式错误，或 Token Plan 与按量付费 API 的 Base URL/API Key 混用。',
         suggestionsZh: [
             '检查 API Key 和 Authorization 请求头格式。',
-            '如果使用 Token Plan，请确认 Base URL 和 API Key 是同一套套餐下的专属配置。',
+            '如果使用 Token Plan，请确认 Base URL 和 API Key 是同一套餐下的专属配置。',
         ],
         titleEn: 'Authentication failed',
         suggestionsEn: [
@@ -124,13 +125,13 @@ export const MIMO_ERROR_CODES: Record<string, MimoErrorCodeInfo> = {
 };
 
 const ERROR_MESSAGES: Record<string, string> = {
-    'ECONNREFUSED': 'Cannot connect to the API server. Check baseUrl, network, and proxy settings.',
-    'ECONNRESET': 'The API connection was reset. The network or upstream server may be unstable.',
-    'ETIMEDOUT': 'The API request timed out. Check network speed, proxy, or provider status.',
-    'ENOTFOUND': 'Cannot resolve the API host. Check baseUrl and DNS settings.',
+    ECONNREFUSED: 'Cannot connect to the API server. Check baseUrl, network, and proxy settings.',
+    ECONNRESET: 'The API connection was reset. The network or upstream server may be unstable.',
+    ETIMEDOUT: 'The API request timed out. Check network speed, proxy, or provider status.',
+    ENOTFOUND: 'Cannot resolve the API host. Check baseUrl and DNS settings.',
     'socket hang up': 'The API connection closed unexpectedly. Try again shortly.',
-    'DEPTH_ZERO_SELF_SIGNED_CERT': 'TLS certificate verification failed because the certificate is self-signed.',
-    'UNABLE_TO_VERIFY_LEAF_SIGNATURE': 'TLS certificate verification failed. Check system time and certificate configuration.',
+    DEPTH_ZERO_SELF_SIGNED_CERT: 'TLS certificate verification failed because the certificate is self-signed.',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'TLS certificate verification failed. Check system time and certificate configuration.',
     '502': 'The API gateway returned an error. The provider may be under maintenance.',
 };
 
@@ -146,28 +147,68 @@ export function extractHttpErrorCode(message: string): string | null {
     return match?.[1] || null;
 }
 
-function formatMimoError(info: MimoErrorCodeInfo, message: string): string {
+function appendRequestSummary(text: string, options: FriendlyErrorOptions = {}): string {
+    const summary = String(options.requestSummary || '').trim();
+    return summary ? `${text}\nRequest summary: ${summary}` : text;
+}
+
+function formatMimoError(info: MimoErrorCodeInfo, message: string, options: FriendlyErrorOptions = {}): string {
     const detail = message.trim() && !new RegExp(`\\b${info.code}\\b`).test(message)
         ? `\n\n原始信息：${message.trim()}`
         : '';
-    return [
+    return appendRequestSummary([
         `MiMo API 返回 ${info.code}：${info.titleZh}`,
         `问题归因：${info.originZh}`,
         `原因：${info.reasonZh}`,
         `建议：${info.suggestionsZh.join('；')}`,
-    ].join('\n') + detail;
+    ].join('\n') + detail, options);
 }
 
 function formatAbortError(options: FriendlyErrorOptions = {}): string {
     if (isMimoRoute(options)) {
-        return [
+        return appendRequestSummary([
             'MiMo 请求已中断：连接或流式响应在完成前被取消。',
-            '问题归因：暂不能单凭 aborted 判定是 Agent 还是大模型。若没有点击 Stop，更可能是网络/服务端流式连接中断；如果总是在工具调用后发生，Agent 续写链路也需要重点排查。',
+            '问题归因：暂不能单凭 aborted 判定是 Agent 还是大模型。若没有点击 Stop，更可能是网络、服务端流式连接中断；如果总是在工具调用后发生，Agent 续写链路也需要重点排查。',
             '原因：这通常发生在网络波动、上游服务提前断开、VS Code 侧停止请求，或工具调用后模型续写阶段被 abort。',
-            '建议：先检查刚才是否已经生成或修改了目标文件；如果已有阶段性结果，可以让 MiMo “继续刚才的任务并验证”。如果频繁出现，请降低请求频率、缩短单轮任务，或切换到稳定的 MiMo endpoint/API Key 后重试。',
-        ].join('\n');
+            '建议：先检查刚才是否已经生成或修改了目标文件；如果已有阶段性结果，可以让 MiMo“继续刚才的任务并验证”。如果频繁出现，请降低请求频率、缩短单轮任务，或切换到稳定的 MiMo endpoint/API Key 后重试。',
+        ].join('\n'), options);
     }
-    return 'Request was aborted before completion. Check whether the request was stopped, the network dropped, or the provider closed the stream early.';
+    return appendRequestSummary(
+        'Request was aborted before completion. Check whether the request was stopped, the network dropped, or the provider closed the stream early.',
+        options,
+    );
+}
+
+function looksLikePostWriteReplayOverload(message: string): boolean {
+    const raw = String(message || '');
+    if (!/\b500\b/.test(raw)) {
+        return false;
+    }
+    const lower = raw.toLowerCase();
+    const payloadSignals = [
+        'write_file',
+        'edit_file',
+        'tool_calls',
+        'function.arguments',
+        'reasoning_content',
+        'context too long',
+        'request too large',
+        'payload too large',
+        'body too large',
+        'too many tokens',
+        'too long',
+    ];
+    return payloadSignals.some(signal => lower.includes(signal));
+}
+
+function formatPostWriteReplayOverload(message: string, options: FriendlyErrorOptions = {}): string {
+    const detail = String(message || '').trim();
+    return appendRequestSummary([
+        'MiMo API 返回 500：更像是写入后的续轮请求过重，而不一定是服务端单独故障。',
+        '问题归因：更可能是 Agent 在 write_file 或 edit_file 之后，把大段文件正文、tool_calls 参数或 reasoning 内容继续回放到下一轮请求里，导致请求体过大或上下文过重。',
+        '原因：这类报错常见于“读了很多 + 刚写了大文件 + 立刻继续下一轮生成”的链路，写文件本身可能已经成功，失败的是后续模型续写请求。',
+        '建议：先检查目标文件是否其实已经写成成功；如果已写成功，可让 MiMo 直接“继续刚才任务并验证”，不要重复整段生成。必要时缩短单轮任务、减少超长 write_file/edit_file 正文，或新开一个更轻的会话继续。',
+    ].join('\n') + (detail ? `\n\n原始信息：${detail}` : ''), options);
 }
 
 export function getFriendlyError(error: Error | string, options: FriendlyErrorOptions = {}): string {
@@ -179,19 +220,26 @@ export function getFriendlyError(error: Error | string, options: FriendlyErrorOp
 
     if (/max_tokens|MaxTokens/i.test(msg) && /invalid|should be in|range|too large|exceed/i.test(msg)) {
         if (isMimoRoute(options)) {
-            return [
+            return appendRequestSummary([
                 'MiMo API 返回 400：生成参数不符合要求。',
                 '问题归因：更可能是 Agent 请求参数或用户生成设置问题，不是大模型推理能力问题。',
                 '原因：当前 Max Tokens 设置超出模型或接口允许范围。',
                 '建议：把 Generation > Max Tokens 调到 65536 或更低，然后重试。',
-            ].join('\n');
+            ].join('\n'), options);
         }
-        return 'FAILED: The selected provider rejected the Max Tokens setting. Lower Generation > Max Tokens to 65536 or less, then retry.';
+        return appendRequestSummary(
+            'FAILED: The selected provider rejected the Max Tokens setting. Lower Generation > Max Tokens to 65536 or less, then retry.',
+            options,
+        );
+    }
+
+    if (isMimoRoute(options) && looksLikePostWriteReplayOverload(msg)) {
+        return formatPostWriteReplayOverload(msg, options);
     }
 
     const code = extractHttpErrorCode(msg);
     if (code && isMimoRoute(options) && MIMO_ERROR_CODES[code]) {
-        return formatMimoError(MIMO_ERROR_CODES[code], msg);
+        return formatMimoError(MIMO_ERROR_CODES[code], msg, options);
     }
 
     for (const [pattern, friendly] of Object.entries(ERROR_MESSAGES)) {
@@ -208,9 +256,9 @@ export function getFriendlyError(error: Error | string, options: FriendlyErrorOp
                 result += '\n\nCheck the API key, baseUrl, selected model, and provider-side model permissions.';
             }
 
-            return result;
+            return appendRequestSummary(result, options);
         }
     }
 
-    return `FAILED: ${msg}`;
+    return appendRequestSummary(`FAILED: ${msg}`, options);
 }

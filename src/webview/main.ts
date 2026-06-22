@@ -25,15 +25,24 @@ class RenderQueue {
     private timer: ReturnType<typeof setTimeout> | undefined;
     private frame = 0;
     private reasoningBuffer = '';
+    private streamDeltaBuffer = '';
+    private latestStreamText: string | undefined;
     private latestStreamHtml: string | undefined;
     private latestStreamLightweight = false;
     private latestStatus: string | undefined;
+    private latestTokenUsage: any;
     private pending: QueuedWebviewMessage[] = [];
 
     enqueue(msg: QueuedWebviewMessage): void {
         switch (msg.type) {
             case 'reasoning':
                 this.reasoningBuffer += msg.token || '';
+                break;
+            case 'streamText':
+                this.latestStreamText = msg.text || '';
+                break;
+            case 'streamDelta':
+                this.streamDeltaBuffer += msg.delta || '';
                 break;
             case 'streamHtml':
                 this.latestStreamHtml = msg.html || '';
@@ -47,6 +56,9 @@ class RenderQueue {
                 break;
             case 'status':
                 this.latestStatus = msg.text || '';
+                break;
+            case 'tokenUsage':
+                this.latestTokenUsage = msg.usage;
                 break;
             case 'workflowTaskStart':
             case 'workflowTaskEnd':
@@ -77,22 +89,33 @@ class RenderQueue {
         }
 
         const reasoning = this.reasoningBuffer;
+        const streamDelta = this.streamDeltaBuffer;
+        const streamText = this.latestStreamText;
         const streamHtml = this.latestStreamHtml;
         const streamLightweight = this.latestStreamLightweight;
         const status = this.latestStatus;
+        const tokenUsage = this.latestTokenUsage;
         const events = this.pending.splice(0);
         this.reasoningBuffer = '';
+        this.streamDeltaBuffer = '';
+        this.latestStreamText = undefined;
         this.latestStreamHtml = undefined;
         this.latestStreamLightweight = false;
         this.latestStatus = undefined;
+        this.latestTokenUsage = undefined;
 
         if (reasoning) bus.emit('reasoning', reasoning);
-        for (const evt of events) this.dispatch(evt);
+        if (streamDelta) bus.emit('streamDelta', streamDelta);
+        if (streamText !== undefined) bus.emit('streamText', streamText);
         if (streamHtml !== undefined) bus.emit('streamHtml', streamHtml, streamLightweight);
+        for (const evt of events) this.dispatch(evt);
         if (status !== undefined) {
             store.set('statusText', status);
             const el = document.getElementById('status-text');
             if (el) el.textContent = status;
+        }
+        if (tokenUsage !== undefined) {
+            bus.emit('tokenUsage', tokenUsage);
         }
         bus.emit('renderFlush');
     }
@@ -111,6 +134,8 @@ class RenderQueue {
     private dispatch(msg: QueuedWebviewMessage): void {
         switch (msg.type) {
             case 'userMessage': bus.emit('userMessage', msg.text, msg.images); break;
+            case 'streamText': bus.emit('streamText', msg.text || ''); break;
+            case 'streamDelta': bus.emit('streamDelta', msg.delta || ''); break;
             case 'streamHtml': bus.emit('streamHtml', msg.html, !!msg.lightweight); break;
             case 'assistantUpdate': bus.emit('assistantUpdate', msg.html); break;
             case 'verificationUpdate': bus.emit('verificationUpdate', msg.html); break;
@@ -132,7 +157,7 @@ class RenderQueue {
             case 'workflowTaskEnd': bus.emit('workflowTaskEnd', msg.phaseIndex, msg.taskIndex, msg.result); break;
             case 'workflowPhaseEnd': bus.emit('workflowPhaseEnd', msg.phaseIndex, msg.result); break;
             case 'workflowEnd': bus.emit('workflowEnd', msg.result); break;
-            case 'fileSearchResults': bus.emit('fileSearchResults', msg.results); break;
+            case 'fileSearchResults': bus.emit('fileSearchResults', msg.results, msg); break;
             default:
                 bus.emit(msg.type, msg);
         }
@@ -197,6 +222,11 @@ function init(): void {
 
             // 閳光偓閳光偓 Messages 閳光偓閳光偓
             case 'userMessage':
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'streamText':
+            case 'streamDelta':
                 renderQueue.enqueue(msg);
                 break;
 
@@ -275,7 +305,7 @@ function init(): void {
                 break;
 
             case 'fileSearchResults':
-                bus.emit('fileSearchResults', msg.results || []);
+                bus.emit('fileSearchResults', msg.results || [], msg);
                 break;
 
             case 'replayBatch':

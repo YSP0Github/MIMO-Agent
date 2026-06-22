@@ -24,6 +24,149 @@ describe('MiMoAPI endpoint selection', () => {
         expect(api.getRequestPath()).toBe('/responses');
         expect(api.getEndpointMode()).toBe('responses');
     });
+
+    it('sanitizes chat-completions request messages to API-safe fields only', () => {
+        const api = new MiMoAPI('key', 'https://api.example.com/v1');
+        const body = (api as any).transformRequest({
+            model: 'mimo-v2.5-pro',
+            messages: [
+                {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                        {
+                            id: 'call_1',
+                            type: 'function',
+                            function: { name: 'write_file', arguments: '{"path":"a.md","content":"hello"}' },
+                        },
+                    ],
+                    reasoning_content: '',
+                    _uiSnapshot: { noisy: true },
+                },
+                {
+                    role: 'tool',
+                    tool_call_id: 'call_1',
+                    content: 'Written to a.md',
+                    _toolName: 'write_file',
+                    _toolElapsed: 0.2,
+                },
+            ],
+        }, true);
+
+        expect(body.messages.length).toBe(2);
+        expect(body.messages[0]._uiSnapshot).toBe(undefined);
+        expect(body.messages[1]._toolName).toBe(undefined);
+        expect(body.messages[1]._toolElapsed).toBe(undefined);
+        expect(body.messages[0].tool_calls[0].function.arguments).toBe('{"path":"a.md","content":"hello"}');
+        expect('reasoning_content' in body.messages[0]).toBe(false);
+    });
+
+    it('sanitizes responses input messages to API-safe fields only', () => {
+        const api = new MiMoAPI('key', 'https://api.example.com/v1', 'responses');
+        const body = (api as any).transformRequest({
+            model: 'mimo-v2.5-pro',
+            messages: [
+                {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                        {
+                            id: 'call_1',
+                            type: 'function',
+                            function: { name: 'write_file', arguments: '{"path":"a.md","content":"hello"}' },
+                        },
+                    ],
+                    reasoning_content: '',
+                    _uiSnapshot: { noisy: true },
+                },
+                {
+                    role: 'tool',
+                    tool_call_id: 'call_1',
+                    content: 'Written to a.md',
+                    _toolName: 'write_file',
+                },
+            ],
+        }, true);
+
+        expect(body.input.length).toBe(2);
+        expect(body.input[0].type).toBe('function_call');
+        expect(body.input[0].call_id).toBe('call_1');
+        expect(body.input[1].type).toBe('function_call_output');
+        expect(body.input[1].output).toBe('Written to a.md');
+    });
+
+    it('builds a request debug summary without leaking message bodies', () => {
+        const api = new MiMoAPI('key', 'https://api.example.com/v1', 'responses');
+        const summary = api.buildRequestDebugSummary([
+            {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                    {
+                        id: 'call_1',
+                        type: 'function',
+                        function: { name: 'write_file', arguments: '{"path":"a.md","content":"top secret body"}' },
+                    },
+                ],
+                reasoning_content: 'hidden reasoning',
+            },
+            {
+                role: 'tool',
+                tool_call_id: 'call_1',
+                content: 'Written to a.md',
+            },
+            {
+                role: 'user',
+                content: [
+                    { type: 'image_url', image_url: { url: 'data:image/png;base64,abc' } },
+                    { type: 'text', text: 'describe this image' },
+                ],
+            },
+        ], 'mimo-v2.5-pro', 4321);
+
+        expect(summary.endpointMode).toBe('responses');
+        expect(summary.model).toBe('mimo-v2.5-pro');
+        expect(summary.messageCount).toBe(3);
+        expect(summary.assistantWithToolCalls).toBe(1);
+        expect(summary.toolMessageCount).toBe(1);
+        expect(summary.reasoningMessageCount).toBe(1);
+        expect(summary.imageMessageCount).toBe(1);
+        expect(summary.bodyChars).toBe(4321);
+    });
+
+    it('stores the last request debug summary for user-facing diagnostics', () => {
+        const api = new MiMoAPI('key', 'https://api.example.com/v1', 'responses');
+
+        (api as any).logRequestDebugSummary([
+            {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                    {
+                        id: 'call_1',
+                        type: 'function',
+                        function: { name: 'write_file', arguments: '{"path":"a.md","content":"hello"}' },
+                    },
+                ],
+            },
+            {
+                role: 'tool',
+                tool_call_id: 'call_1',
+                content: 'Written to a.md',
+            },
+        ], 'mimo-v2.5-pro', 2048);
+
+        expect(api.getLastRequestSummary()).toContain('model=mimo-v2.5-pro');
+        expect(api.getLastRequestSummary()).toContain('endpoint=responses');
+        expect(api.getLastRequestSummary()).toContain('body_chars=2048');
+    });
+
+    it('treats incomplete streamed tool-call arguments as retryable stream failures', () => {
+        const api = new MiMoAPI('key', 'https://api.example.com/v1');
+        expect(typeof (api as any).chatCompletionsStream).toBe('function');
+        expect((api as any).getRequestPath()).toBe('/chat/completions');
+        expect(/unexpected end of data/i.test('unexpected end of data: incomplete streamed tool_call arguments')).toBe(true);
+    });
 });
 
 describe('proxy resolution', () => {

@@ -77,6 +77,20 @@ export interface StreamCallbacks {
     onUsage?: (usage: TokenUsage) => void;
 }
 
+type StreamingToolCallState = {
+    id: string;
+    name: string;
+    arguments: string;
+};
+
+type RequestChatMessage = {
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string | ContentPart[] | null;
+    tool_call_id?: string;
+    tool_calls?: ToolCall[];
+    reasoning_content?: string;
+};
+
 type ResponseInputItem = {
     role?: 'system' | 'user' | 'assistant';
     type?: string;
@@ -88,6 +102,17 @@ type ResponseInputItem = {
 };
 
 type RequestHeaders = Record<string, string | number>;
+
+export interface RequestDebugSummary {
+    endpointMode: ApiEndpointMode;
+    model: string;
+    messageCount: number;
+    assistantWithToolCalls: number;
+    toolMessageCount: number;
+    reasoningMessageCount: number;
+    imageMessageCount: number;
+    bodyChars?: number;
+}
 
 type ProxyEnv = NodeJS.ProcessEnv;
 
@@ -273,6 +298,26 @@ function isRetryableStreamError(error: any): boolean {
     return /Request timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|unexpected end of data|aborted before complete/i.test(message);
 }
 
+function isLikelyCompleteJsonObject(text: string): boolean {
+    const trimmed = String(text || '').trim();
+    return trimmed.startsWith('{') && trimmed.endsWith('}');
+}
+
+function looksLikeIncompleteToolCallPayload(toolCallsMap: Map<number, StreamingToolCallState>): boolean {
+    for (const [, tc] of toolCallsMap) {
+        if (!tc?.name) continue;
+        const args = String(tc.arguments || '').trim();
+        if (!args) return true;
+        if (!isLikelyCompleteJsonObject(args)) return true;
+        try {
+            JSON.parse(args);
+        } catch {
+            return true;
+        }
+    }
+    return false;
+}
+
 function retryDelayMs(error: any, attempt: number): number {
     const retryAfter = parseRetryAfterMs(String(error?.message || ''));
     if (retryAfter !== null) return Math.min(retryAfter, 30_000);
@@ -402,6 +447,8 @@ function responseBodyFromHeaders(headers: string, body: Buffer): Buffer {
  * Uses OpenAI-compatible chat completions with SSE streaming.
  */
 export class MiMoAPI {
+    private lastRequestSummary = '';
+
     constructor(
         private apiKey: string,
         private baseUrl: string,
@@ -420,12 +467,126 @@ export class MiMoAPI {
         return `${this.baseUrl}${this.getRequestPath()}`;
     }
 
+    private sanitizeMessagesForRequest(messages: any): RequestChatMessage[] {
+        if (!Array.isArray(messages)) return [];
+        const sanitized: RequestChatMessage[] = [];
+        for (const raw of messages) {
+            if (!raw || typeof raw !== 'object') continue;
+            const role = raw.role;
+            if (!['system', 'user', 'assistant', 'tool'].includes(role)) continue;
+
+            const message: RequestChatMessage = {
+                role,
+                content: null,
+            };
+
+            if (typeof raw.content === 'string' || raw.content === null) {
+                message.content = raw.content;
+            } else if (Array.isArray(raw.content)) {
+                message.content = raw.content
+                    .filter((part: any) => part && typeof part === 'object' && (part.type === 'text' || part.type === 'image_url'))
+                    .map((part: any) => {
+                        if (part.type === 'text') {
+                            return { type: 'text' as const, text: typeof part.text === 'string' ? part.text : '' };
+                        }
+                        return {
+                            type: 'image_url' as const,
+                            image_url: { url: String(part.image_url?.url || '') },
+                        };
+                    });
+            } else {
+                message.content = '';
+            }
+
+            if (role === 'assistant' && Array.isArray(raw.tool_calls) && raw.tool_calls.length > 0) {
+                message.tool_calls = raw.tool_calls
+                    .filter((toolCall: any) => toolCall?.id && toolCall?.function?.name)
+                    .map((toolCall: any) => ({
+                        id: String(toolCall.id),
+                        type: 'function' as const,
+                        function: {
+                            name: String(toolCall.function.name),
+                            arguments: typeof toolCall.function.arguments === 'string'
+                                ? toolCall.function.arguments
+                                : JSON.stringify(toolCall.function.arguments || {}),
+                        },
+                    }));
+                message.content = message.content ?? null;
+                const reasoning = typeof raw.reasoning_content === 'string' ? raw.reasoning_content : '';
+                if (reasoning) {
+                    message.reasoning_content = reasoning;
+                }
+            } else if (role === 'assistant' && typeof raw.reasoning_content === 'string' && raw.reasoning_content) {
+                message.reasoning_content = raw.reasoning_content;
+            }
+
+            if (role === 'tool' && raw.tool_call_id) {
+                message.tool_call_id = String(raw.tool_call_id);
+            }
+
+            sanitized.push(message);
+        }
+        return sanitized;
+    }
+
+    buildRequestDebugSummary(messages: any, model: string, bodyChars?: number): RequestDebugSummary {
+        const sanitized = this.sanitizeMessagesForRequest(messages);
+        let assistantWithToolCalls = 0;
+        let toolMessageCount = 0;
+        let reasoningMessageCount = 0;
+        let imageMessageCount = 0;
+        for (const message of sanitized) {
+            if (message.role === 'assistant' && message.tool_calls?.length) {
+                assistantWithToolCalls++;
+            }
+            if (message.role === 'tool') {
+                toolMessageCount++;
+            }
+            if (message.reasoning_content) {
+                reasoningMessageCount++;
+            }
+            if (Array.isArray(message.content) && message.content.some(part => part?.type === 'image_url')) {
+                imageMessageCount++;
+            }
+        }
+        return {
+            endpointMode: this.apiEndpoint,
+            model: String(model || ''),
+            messageCount: sanitized.length,
+            assistantWithToolCalls,
+            toolMessageCount,
+            reasoningMessageCount,
+            imageMessageCount,
+            bodyChars,
+        };
+    }
+
+    private formatRequestDebugSummary(summary: RequestDebugSummary): string {
+        return `model=${summary.model}, endpoint=${summary.endpointMode}, messages=${summary.messageCount}, ` +
+            `assistant_tool_calls=${summary.assistantWithToolCalls}, tool_messages=${summary.toolMessageCount}, ` +
+            `reasoning_messages=${summary.reasoningMessageCount}, image_messages=${summary.imageMessageCount}, ` +
+            `body_chars=${summary.bodyChars}`;
+    }
+
+    private logRequestDebugSummary(messages: any, model: string, bodyChars: number): void {
+        const summary = this.buildRequestDebugSummary(messages, model, bodyChars);
+        this.lastRequestSummary = this.formatRequestDebugSummary(summary);
+        console.log(`[MiMo API] Request summary: ${this.lastRequestSummary}`);
+    }
+
+    getLastRequestSummary(): string {
+        return this.lastRequestSummary;
+    }
+
     private transformRequest(params: Record<string, any>, stream: boolean): Record<string, any> {
-        if (this.apiEndpoint !== 'responses') return { ...params, stream };
+        const sanitizedMessages = this.sanitizeMessagesForRequest(params.messages);
+        if (this.apiEndpoint !== 'responses') {
+            return { ...params, messages: sanitizedMessages, stream };
+        }
 
         const body: Record<string, any> = {
             model: params.model,
-            input: this.toResponsesInput(params.messages),
+            input: this.toResponsesInput(sanitizedMessages),
             stream,
         };
 
@@ -585,6 +746,7 @@ export class MiMoAPI {
         const url = this.buildUrl();
         const requestBody = this.transformRequest(params, false);
         const body = Buffer.from(JSON.stringify(requestBody), 'utf-8');
+        this.logRequestDebugSummary(params.messages, params.model, body.length);
 
         return new Promise((resolve, reject) => {
             const parsed = new URL(url);
@@ -725,7 +887,7 @@ export class MiMoAPI {
         const url = this.buildUrl();
         const requestBody = this.transformRequest(params, true);
         const body = Buffer.from(JSON.stringify(requestBody), 'utf-8');
-        console.log(`[MiMo API] Request: ${params.model}, messages: ${params.messages?.length}, body size: ${body.length} chars`);
+        this.logRequestDebugSummary(params.messages, params.model, body.length);
 
         return new Promise((resolve, reject) => {
             const parsed = new URL(url);
@@ -734,7 +896,7 @@ export class MiMoAPI {
             const agent = createRequestAgent(parsed);
             let settled = false;
             const settle = (err: Error) => { if (!settled) { settled = true; reject(err); } };
-            const finalizeStreamBody = (bodyText: string, toolCallsMap: Map<number, { id: string; name: string; arguments: string }>, collectedUsage: TokenUsage | null, collectedContent: string, collectedReasoning: string) => {
+            const finalizeStreamBody = (bodyText: string, toolCallsMap: Map<number, StreamingToolCallState>, collectedUsage: TokenUsage | null, collectedContent: string, collectedReasoning: string) => {
                 const toolCalls: ToolCall[] = [];
                 for (const [, tc] of toolCallsMap) {
                     if (tc.id && tc.name) {
@@ -744,6 +906,9 @@ export class MiMoAPI {
                             function: { name: tc.name, arguments: tc.arguments },
                         });
                     }
+                }
+                if (looksLikeIncompleteToolCallPayload(toolCallsMap)) {
+                    throw new Error('unexpected end of data: incomplete streamed tool_call arguments');
                 }
                 if (toolCalls.length > 0) callbacks.onToolCalls?.(toolCalls);
                 if (collectedUsage) callbacks.onUsage?.(collectedUsage);
@@ -764,7 +929,7 @@ export class MiMoAPI {
                 let collectedContent = '';
                 let collectedReasoning = '';
                 let collectedUsage: TokenUsage | null = null;
-                const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
+                const toolCallsMap = new Map<number, StreamingToolCallState>();
                 let socketHandle: { destroy: () => void } | null = null;
 
                 const finishSocketStream = () => {
@@ -777,6 +942,10 @@ export class MiMoAPI {
                                 function: { name: tc.name, arguments: tc.arguments },
                             });
                         }
+                    }
+                    if (looksLikeIncompleteToolCallPayload(toolCallsMap)) {
+                        settle(new Error('unexpected end of data: incomplete streamed tool_call arguments'));
+                        return;
                     }
                     if (toolCalls.length > 0) callbacks.onToolCalls?.(toolCalls);
                     if (collectedUsage) callbacks.onUsage?.(collectedUsage);
@@ -951,7 +1120,7 @@ export class MiMoAPI {
                     let collectedContent = '';
                     let collectedReasoning = '';
                     let collectedUsage: TokenUsage | null = null;
-                    const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
+                    const toolCallsMap = new Map<number, StreamingToolCallState>();
                     let buffer = '';
 
                     res.on('data', (chunk: Buffer) => {
@@ -982,6 +1151,10 @@ export class MiMoAPI {
                                             function: { name: tc.name, arguments: tc.arguments },
                                         });
                                     }
+                                }
+                                if (looksLikeIncompleteToolCallPayload(toolCallsMap)) {
+                                    settle(new Error('unexpected end of data: incomplete streamed tool_call arguments'));
+                                    return;
                                 }
                                 if (toolCalls.length > 0) {
                                     callbacks.onToolCalls?.(toolCalls);
@@ -1101,6 +1274,10 @@ export class MiMoAPI {
                                 });
                             }
                         }
+                        if (looksLikeIncompleteToolCallPayload(toolCallsMap)) {
+                            settle(new Error('unexpected end of data: incomplete streamed tool_call arguments'));
+                            return;
+                        }
                         if (collectedUsage) {
                             callbacks.onUsage?.(collectedUsage);
                         }
@@ -1142,7 +1319,7 @@ export class MiMoAPI {
 
     private handleResponsesStreamEvent(
         parsed: any,
-        toolCallsMap: Map<number, { id: string; name: string; arguments: string }>,
+        toolCallsMap: Map<number, StreamingToolCallState>,
         callbacks: StreamCallbacks,
     ): { contentDelta: string; reasoningDelta: string; usage: TokenUsage | null } {
         const type = String(parsed?.type || '');

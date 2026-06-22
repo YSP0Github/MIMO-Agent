@@ -28,6 +28,20 @@ describe('isCommandSafe — always blocked', () => {
         expect(r.blocked).toBe(false);
         expect(r.needsConfirm).toBe(false);
     });
+
+    it('should block oversized file generation through shell commands', () => {
+        expect(
+            isCommandSafe(
+                `powershell -Command "[System.IO.File]::WriteAllText('big.txt', ('a' * 100MB))"`
+            ).blocked
+        ).toBe(true);
+        expect(
+            isCommandSafe(
+                `powershell -Command "$fs = [System.IO.File]::Create('big.bin'); $fs.SetLength(104857600); $fs.Close()"`
+            ).blocked
+        ).toBe(true);
+        expect(isCommandSafe('fsutil file createnew big.txt 104857600').blocked).toBe(true);
+    });
 });
 
 describe('isCommandSafe — needs confirmation', () => {
@@ -50,6 +64,13 @@ describe('isCommandSafe — allowed', () => {
         expect(isCommandSafe('git status').blocked).toBe(false);
         expect(isCommandSafe('rm file.txt').blocked).toBe(false);
         expect(isCommandSafe('rm file.txt').needsConfirm).toBe(false);
+    });
+
+    it('should allow small file generation commands', () => {
+        expect(
+            isCommandSafe(`powershell -Command "Set-Content -Path small.txt -Value ('a' * 1MB)"`).blocked
+        ).toBe(false);
+        expect(isCommandSafe('fsutil file createnew sample.bin 1048576').blocked).toBe(false);
     });
 });
 

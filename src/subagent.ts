@@ -16,6 +16,7 @@ import { manageContext } from './context';
 import { McpManager } from './mcp';
 import { SandboxConfig } from './sandbox';
 import { DependencyInstallConfig } from './dependencyInstall';
+import { sanitizeToolCallsForConversation } from './toolCallSanitizer';
 
 // ── Types ──
 
@@ -237,7 +238,12 @@ Rules:
         }
 
         // Execute tool calls
-        const assistantMsg: ChatMessage = { role: 'assistant', content: content || null as any, tool_calls: toolCalls, reasoning_content: '' };
+        const assistantMsg: ChatMessage = {
+            role: 'assistant',
+            content: content || null as any,
+            tool_calls: sanitizeToolCallsForConversation(toolCalls),
+            reasoning_content: '',
+        };
         messages.push(assistantMsg);
 
         for (const tc of toolCalls) {

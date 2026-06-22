@@ -30,13 +30,18 @@ function isNearBottom(el: HTMLElement, threshold = 120): boolean {
 }
 
 let pendingScrollFrame = 0;
+let pendingScrollTarget: HTMLElement | null = null;
 
 export function smartScroll(el: HTMLElement): void {
+    pendingScrollTarget = el;
     if (pendingScrollFrame) return;
     pendingScrollFrame = requestAnimationFrame(() => {
         pendingScrollFrame = 0;
-        if (isNearBottom(el)) {
-            el.scrollTop = el.scrollHeight;
+        const target = pendingScrollTarget;
+        pendingScrollTarget = null;
+        if (!target) return;
+        if (isNearBottom(target)) {
+            target.scrollTop = target.scrollHeight;
         }
     });
 }

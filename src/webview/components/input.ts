@@ -771,8 +771,8 @@ export const InputArea = {
         });
 
         // Listen for results
-        bus.on('fileSearchResults', (results: FilePickerEntry[]) => {
-            this._renderFileSearchResults(results);
+        bus.on('fileSearchResults', (results: FilePickerEntry[], meta?: { shown?: number; total?: number; truncated?: boolean; query?: string }) => {
+            this._renderFileSearchResults(results, meta);
         });
 
         // Close on outside click
@@ -864,7 +864,7 @@ export const InputArea = {
         return false;
     },
 
-    _renderFileSearchResults(results: FilePickerEntry[]): void {
+    _renderFileSearchResults(results: FilePickerEntry[], meta?: { shown?: number; total?: number; truncated?: boolean; query?: string }): void {
         const popup = document.getElementById('file-search-popup');
         if (!popup) return;
         if (this._fileSearchRequestTimer) {
@@ -875,6 +875,7 @@ export const InputArea = {
         popup.querySelector('.file-search-list')?.remove();
         popup.querySelector('.file-search-empty')?.remove();
         popup.querySelector('.file-search-loading')?.remove();
+        popup.querySelector('.file-search-summary')?.remove();
         const fileEntries = results.filter(r => (r.kind || 'file') === 'file');
         this._fileSearchResults = fileEntries.map(r => this._makeAttachedFileRef(r.fullPath, r.name, r.relativePath));
         this._activeFileSearchIndex = 0;
@@ -889,7 +890,6 @@ export const InputArea = {
 
         const list = document.createElement('div');
         list.className = 'file-search-list';
-        const expandedDirs = new Set<string>();
         const treeMode = results.some(r => (r.kind || 'file') === 'directory');
         let fileIndex = 0;
         for (const r of results) {
@@ -902,9 +902,13 @@ export const InputArea = {
             item.dataset.relative = r.relativePath;
             item.dataset.kind = kind;
             item.style.setProperty('--file-depth', String(depth));
-            if (treeMode && r.parent && !expandedDirs.has(r.parent)) item.classList.add('file-search-child-collapsed');
             if (kind === 'directory') {
-                expandedDirs.add(r.relativePath);
+                if (depth <= 0) {
+                    item.dataset.expanded = 'true';
+                } else {
+                    item.classList.add('collapsed');
+                    item.dataset.expanded = 'false';
+                }
                 item.innerHTML = `<span class="file-search-chevron">▾</span><span class="file-search-icon" aria-hidden="true"></span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath || '.')}</span></span>`;
                 item.addEventListener('click', () => this._toggleFileTreeDirectory(list, r.relativePath, item));
             } else {
@@ -918,6 +922,16 @@ export const InputArea = {
             }
             list.appendChild(item);
         }
+        if (treeMode) this._syncFileTreeVisibility(list);
+        const shown = Number(meta?.shown ?? results.length);
+        const total = Number(meta?.total ?? results.length);
+        const truncated = !!meta?.truncated;
+        const summary = document.createElement('div');
+        summary.className = 'file-search-summary';
+        summary.textContent = truncated
+            ? `Showing ${shown} / ${total}${meta?.query ? ' matches' : ' entries'}`
+            : `${shown}${meta?.query ? ' matches' : ' entries'}`;
+        popup.appendChild(summary);
         popup.appendChild(list);
     },
 
@@ -931,6 +945,7 @@ export const InputArea = {
         popup.querySelector('.file-search-list')?.remove();
         popup.querySelector('.file-search-empty')?.remove();
         popup.querySelector('.file-search-loading')?.remove();
+        popup.querySelector('.file-search-summary')?.remove();
         const el = document.createElement('div');
         el.className = className;
         el.textContent = text;
@@ -938,18 +953,34 @@ export const InputArea = {
     },
 
     _toggleFileTreeDirectory(list: HTMLElement, dirPath: string, row: HTMLElement): void {
-        const isCollapsed = row.classList.toggle('collapsed');
-        const descendants = Array.from(list.querySelectorAll<HTMLElement>('.file-search-item'))
-            .filter(item => {
-                const rel = item.dataset.relative || '';
-                return rel.startsWith(`${dirPath}/`);
-            });
-        for (const item of descendants) {
-            if (isCollapsed) {
-                item.classList.add('file-search-child-collapsed');
-            } else {
-                item.classList.remove('file-search-child-collapsed');
+        const nextExpanded = row.dataset.expanded !== 'true';
+        row.dataset.expanded = nextExpanded ? 'true' : 'false';
+        row.classList.toggle('collapsed', !nextExpanded);
+        this._syncFileTreeVisibility(list);
+    },
+
+    _syncFileTreeVisibility(list: HTMLElement): void {
+        const items = Array.from(list.querySelectorAll<HTMLElement>('.file-search-item'));
+        const byPath = new Map<string, HTMLElement>();
+        for (const item of items) {
+            const rel = item.dataset.relative || '';
+            byPath.set(rel, item);
+        }
+        for (const item of items) {
+            const rel = item.dataset.relative || '';
+            const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+            let visible = true;
+            let currentParent = parent;
+            while (currentParent) {
+                const parentItem = byPath.get(currentParent);
+                if (!parentItem) break;
+                if (parentItem.dataset.expanded !== 'true') {
+                    visible = false;
+                    break;
+                }
+                currentParent = currentParent.includes('/') ? currentParent.slice(0, currentParent.lastIndexOf('/')) : '';
             }
+            item.classList.toggle('file-search-child-collapsed', !visible && !!parent);
         }
     },
 
@@ -964,6 +995,8 @@ export const InputArea = {
             if (empty) empty.remove();
             const loading = popup.querySelector('.file-search-loading');
             if (loading) loading.remove();
+            const summary = popup.querySelector('.file-search-summary');
+            if (summary) summary.remove();
         }
         if (this._fileSearchRequestTimer) {
             clearTimeout(this._fileSearchRequestTimer);
@@ -976,7 +1009,7 @@ export const InputArea = {
         if (this._fileSearchResults.length === 0) return;
         const next = (index + this._fileSearchResults.length) % this._fileSearchResults.length;
         this._activeFileSearchIndex = next;
-        const items = Array.from(document.querySelectorAll<HTMLElement>('.file-search-file'));
+        const items = Array.from(document.querySelectorAll<HTMLElement>('#file-search-popup .file-search-file'));
         items.forEach((item, i) => item.classList.toggle('active', i === next));
         items[next]?.scrollIntoView({ block: 'nearest' });
     },

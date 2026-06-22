@@ -3,6 +3,15 @@
  * Run: node out/test/test-runner.js
  */
 
+if (typeof (globalThis as any).acquireVsCodeApi !== 'function') {
+    let state: any = {};
+    (globalThis as any).acquireVsCodeApi = () => ({
+        postMessage(_msg: any) {},
+        setState(next: any) { state = next; },
+        getState() { return state; },
+    });
+}
+
 let passed = 0;
 let failed = 0;
 let total = 0;

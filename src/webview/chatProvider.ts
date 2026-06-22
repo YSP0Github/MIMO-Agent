@@ -7,11 +7,13 @@ import { MiMoAgent } from '../agent';
 import { AgentMode } from '../agent';
 import { HistoryManager } from '../history';
 import { readSettings, saveSetting, getSettingsPanel, loadConfig } from '../config';
-import { renderMarkdown, renderStreamingMarkdown } from '../markdown';
+import { renderMarkdown } from '../markdown';
 import { ApiEndpointMode, ContentPart, ChatMessage, MiMoAPI, normalizeApiEndpointMode } from '../api';
 import { getContextStats } from '../context';
 import { buildPlanExecutionMessage, getMimoPlansDir, looksLikePlanResponse, sanitizePlanMarkdown } from '../planMode';
 import { ReadonlyPreviewProvider } from '../readonlyPreview';
+import { collectWorkspaceFileEntries, DEFAULT_WORKSPACE_FILE_PICKER_MAX_ENTRIES, orderWorkspaceFileEntriesForTree, WorkspaceFilePickerEntry } from '../workspaceFilePicker';
+import { shouldDeferStreamingRender } from './components/messages/StreamingRenderer';
 
 /**
  * Auto-clean old plan files in ~/.mimo/plans/
@@ -108,6 +110,29 @@ function formatContextTokenCount(n: number): string {
     return String(Math.round(n));
 }
 
+function messageContentLength(content: ChatMessage['content'] | null | undefined): number {
+    if (typeof content === 'string') return content.length;
+    if (!Array.isArray(content)) return 0;
+    let total = 0;
+    for (const part of content as any[]) {
+        if (part?.type === 'text') total += String(part.text || '').length;
+        else if (part?.type === 'image_url') total += 1200;
+        else total += JSON.stringify(part || {}).length;
+    }
+    return total;
+}
+
+function contextUsageSignature(messages: ChatMessage[], model: string): string {
+    const last = messages[messages.length - 1] as any;
+    return [
+        model,
+        messages.length,
+        last?.role || '',
+        messageContentLength(last?.content),
+        Math.round(Number(last?._elapsedSec || 0) * 10),
+    ].join(':');
+}
+
 function isPathInside(parent: string, child: string): boolean {
     const rel = path.relative(path.resolve(parent), path.resolve(child));
     return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
@@ -135,6 +160,14 @@ function sanitizeNumber(value: unknown, min: number, max: number): number | unde
 
 function sanitizeBoolean(value: unknown): boolean | undefined {
     return typeof value === 'boolean' ? value : undefined;
+}
+
+function truncateHtmlSnapshot(html: string, maxChars: number): string {
+    const text = String(html || '');
+    if (text.length <= maxChars) return text;
+    const head = text.slice(0, Math.floor(maxChars * 0.65));
+    const tail = text.slice(-Math.floor(maxChars * 0.2));
+    return `${head}\n<!-- snapshot truncated for performance (${text.length - head.length - tail.length} chars omitted) -->\n${tail}`;
 }
 
 function detectProviderFromBaseUrl(baseUrl: string): string {
@@ -405,13 +438,21 @@ function createReasoningPostQueue(post: (msg: any) => void) {
 function createStreamingRenderQueue(post: (msg: any) => void) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let lastText = '';
-    let lastRenderedText = '';
+    let postedLength = 0;
+    let lastPostedAt = 0;
 
     const renderNow = (text: string) => {
-        if (text === lastRenderedText) return;
-        lastRenderedText = text;
+        if (text.length <= postedLength) return;
+        const now = Date.now();
+        const previousTextHint = postedLength > 0 ? text.slice(0, postedLength) : '';
+        if (shouldDeferStreamingRender(text, previousTextHint, lastPostedAt, now)) {
+            return;
+        }
+        const delta = text.slice(postedLength);
+        postedLength = text.length;
+        lastPostedAt = now;
         try {
-            post({ type: 'streamHtml', html: renderStreamingMarkdown(text), lightweight: true });
+            post({ type: 'streamDelta', delta });
         } catch (e: any) {
             post({ type: 'error', error: `Render failed: ${e?.message || String(e)}` });
         }
@@ -421,7 +462,7 @@ function createStreamingRenderQueue(post: (msg: any) => void) {
         schedule(text: string) {
             lastText = text;
             if (timer) return;
-            const delay = text.length > 30_000 ? 1800 : text.length > 12_000 ? 1000 : 500;
+            const delay = text.length > 50_000 ? 2600 : text.length > 30_000 ? 1800 : text.length > 12_000 ? 1000 : 500;
             timer = setTimeout(() => {
                 timer = undefined;
                 renderNow(lastText);
@@ -439,6 +480,8 @@ function createStreamingRenderQueue(post: (msg: any) => void) {
                 clearTimeout(timer);
                 timer = undefined;
             }
+            postedLength = 0;
+            lastPostedAt = 0;
         },
     };
 }
@@ -508,15 +551,6 @@ interface SerializedChatPanelState {
     uiLang?: 'en' | 'zh';
 }
 
-interface WorkspaceFilePickerEntry {
-    name: string;
-    relativePath: string;
-    fullPath: string;
-    kind: 'file' | 'directory';
-    depth: number;
-    parent: string;
-}
-
 type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
 
 export class ChatViewProvider {
@@ -529,6 +563,7 @@ export class ChatViewProvider {
     private windowReasoningEffort: ReasoningEffort;
     private activeTurnTokens = new Map<string, string>();
     private workspaceFileCache?: { root: string; createdAt: number; entries: WorkspaceFilePickerEntry[] };
+    private contextUsageCache = new Map<string, { signature: string; message: any; createdAt: number }>();
     private pendingHistorySaves = new Map<string, {
         title: string;
         messages: ChatMessage[];
@@ -536,6 +571,10 @@ export class ChatViewProvider {
         metadata: Partial<Pick<import('../history').HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'inputHistory' | 'modelEndpointId'>>;
     }>();
     private historySaveTimer: ReturnType<typeof setTimeout> | undefined;
+    private static readonly MAX_UI_SNAPSHOT_HTML = 220_000;
+    private static readonly MAX_TASK_CHANGE_PATCH_CHARS = 180_000;
+    private static readonly MAX_TASK_CHANGE_FILES = 12;
+    private static readonly MAX_TASK_CHANGE_FILE_BYTES = 220_000;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -586,11 +625,18 @@ export class ChatViewProvider {
 
     private attachUiSnapshot(convId: string, snapshot: any): void {
         if (!snapshot || typeof snapshot !== 'object' || typeof snapshot.assistantHtml !== 'string') return;
-        if (snapshot.assistantHtml.length > 750_000) return;
+        if (snapshot.assistantHtml.length > 1_500_000) return;
+        const trimmedSnapshot = {
+            ...snapshot,
+            assistantHtml: truncateHtmlSnapshot(String(snapshot.assistantHtml || ''), ChatViewProvider.MAX_UI_SNAPSHOT_HTML),
+            userHtml: typeof snapshot.userHtml === 'string'
+                ? truncateHtmlSnapshot(snapshot.userHtml, Math.min(60_000, Math.floor(ChatViewProvider.MAX_UI_SNAPSHOT_HTML * 0.2)))
+                : snapshot.userHtml,
+        };
         const messages = this.agent.getMessages(convId);
         for (let i = messages.length - 1; i >= 0; i--) {
             if (messages[i].role === 'assistant') {
-                messages[i]._uiSnapshot = snapshot;
+                messages[i]._uiSnapshot = trimmedSnapshot;
                 return;
             }
         }
@@ -680,43 +726,7 @@ export class ChatViewProvider {
             return this.workspaceFileCache.entries;
         }
 
-        const results: WorkspaceFilePickerEntry[] = [];
-        const ignored = new Set(['.git', 'node_modules', 'out', 'dist', '.vscode', '__pycache__']);
-        const ignoredFileExt = new Set(['.pyc', '.pyo', '.map']);
-        const maxEntries = 2_500;
-        const toEntry = (fullPath: string, kind: 'file' | 'directory'): WorkspaceFilePickerEntry => {
-            const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
-            return {
-                name: path.basename(fullPath),
-                relativePath,
-                fullPath,
-                kind,
-                depth: relativePath ? relativePath.split('/').length - 1 : 0,
-                parent: relativePath.includes('/') ? relativePath.slice(0, relativePath.lastIndexOf('/')) : '',
-            };
-        };
-        const sortEntries = (entries: fs.Dirent[]) => entries.sort((a, b) => {
-            if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-            return a.name.localeCompare(b.name);
-        });
-        const walk = (dir: string, depth: number): void => {
-            if (depth > 8 || results.length >= maxEntries) return;
-            try {
-                const entries = sortEntries(fs.readdirSync(dir, { withFileTypes: true }));
-                for (const entry of entries) {
-                    if (results.length >= maxEntries) break;
-                    if (entry.name.startsWith('.') || ignored.has(entry.name)) continue;
-                    const fullPath = path.join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        results.push(toEntry(fullPath, 'directory'));
-                        walk(fullPath, depth + 1);
-                    } else if (entry.isFile() && !ignoredFileExt.has(path.extname(entry.name).toLowerCase())) {
-                        results.push(toEntry(fullPath, 'file'));
-                    }
-                }
-            } catch { /* skip inaccessible dirs */ }
-        };
-        walk(root, 0);
+        const results = collectWorkspaceFileEntries(root, DEFAULT_WORKSPACE_FILE_PICKER_MAX_ENTRIES);
         this.workspaceFileCache = { root, createdAt: now, entries: results };
         return results;
     }
@@ -727,7 +737,9 @@ export class ChatViewProvider {
         const root = workspaceFolders[0].uri.fsPath;
         const lowerQuery = query.trim().toLowerCase();
         const entries = this.getWorkspaceFileEntries(root);
-        if (!lowerQuery) return entries.slice(0, maxResults);
+        if (!lowerQuery) {
+            return orderWorkspaceFileEntriesForTree(entries, Math.min(maxResults, entries.length));
+        }
         return entries
             .filter(entry => entry.kind === 'file')
             .filter(entry => entry.name.toLowerCase().includes(lowerQuery) || entry.relativePath.toLowerCase().includes(lowerQuery))
@@ -1170,8 +1182,12 @@ export class ChatViewProvider {
                 }
                 case 'searchFiles': {
                     const query = String(msg.query || '').trim();
-                    const results = this.searchWorkspaceFiles(query, query ? 120 : 500);
-                    post({ type: 'fileSearchResults', results });
+                    const requestedLimit = query ? 120 : DEFAULT_WORKSPACE_FILE_PICKER_MAX_ENTRIES;
+                    const results = this.searchWorkspaceFiles(query, requestedLimit);
+                    const total = query
+                        ? this.getWorkspaceFileEntries(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '').filter(entry => entry.kind === 'file').filter(entry => entry.name.toLowerCase().includes(query.toLowerCase()) || entry.relativePath.toLowerCase().includes(query.toLowerCase())).length
+                        : this.getWorkspaceFileEntries(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '').length;
+                    post({ type: 'fileSearchResults', results, shown: results.length, total, truncated: total > results.length, query });
                     break;
                 }
                 case 'setModel': {
@@ -1674,19 +1690,29 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const conv = this.agent.getConversation(convId);
         if (!conv) return { type: 'contextUsage', usage: null };
         const messages = this.agent.getMessages(convId);
+        const hasPending = !!(pending && (pending.text || pending.images?.length));
+        const model = this.agent.getModel(convId);
+        if (!hasPending) {
+            const signature = contextUsageSignature(messages, model);
+            const cached = this.contextUsageCache.get(convId);
+            if (cached && cached.signature === signature && Date.now() - cached.createdAt < 10_000) {
+                return cached.message;
+            }
+        }
+        const statsMessages = hasPending ? messages.slice() : messages;
         if (pending && (pending.text || pending.images?.length)) {
             const parts: ContentPart[] = [];
             if (pending.text) parts.push({ type: 'text', text: pending.text });
             for (const image of pending.images || []) {
                 parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
             }
-            messages.push({
+            statsMessages.push({
                 role: 'user',
                 content: parts.length > 1 ? parts : (pending.text || ''),
             } as ChatMessage);
         }
-        const stats = getContextStats(messages, this.agent.getModel(convId));
-        return {
+        const stats = getContextStats(statsMessages, model);
+        const message = {
             type: 'contextUsage',
             usage: {
                 ...stats,
@@ -1694,6 +1720,18 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 totalLabel: formatContextTokenCount(stats.total),
             },
         };
+        if (!hasPending) {
+            this.contextUsageCache.set(convId, {
+                signature: contextUsageSignature(messages, model),
+                message,
+                createdAt: Date.now(),
+            });
+            if (this.contextUsageCache.size > 80) {
+                const first = this.contextUsageCache.keys().next().value;
+                if (first) this.contextUsageCache.delete(first);
+            }
+        }
+        return message;
     }
 
     /** Find the PanelState that owns a given panel */
@@ -1748,8 +1786,6 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
         // Show user message with optional images
         const turnStartedAt = Date.now();
-        const baselineChanges = await this.agent.getWorkspaceChangeSummary();
-        const baselinePatch = baselineChanges?.patch || '';
         const turnToolChanges: TurnChangeTracker = { files: new Map(), snapshots: new Map() };
         post({ type: 'userMessage', text, images: images || null });
         post(this.contextUsageMessage(activeId, { text, images: images || null }));
@@ -1938,7 +1974,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     const msgs = this.agent.getMessages(activeId);
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
                     post(this.contextUsageMessage(activeId));
-                    this.postTaskChanges(post, baselinePatch, turnToolChanges);
+                    this.postTaskChanges(post, turnToolChanges);
                     if (stoppedByUser) {
                         post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '已手动停止当前任务。' : 'Stopped this task manually.' });
                     }
@@ -2208,7 +2244,9 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             if (!fs.existsSync(resolved.fullPath)) return { existed: false };
             const stat = fs.statSync(resolved.fullPath);
             if (!stat.isFile()) return { existed: true, skipped: 'not a regular file' };
-            if (stat.size > 1024 * 1024) return { existed: true, skipped: 'file is larger than 1MB' };
+            if (stat.size > ChatViewProvider.MAX_TASK_CHANGE_FILE_BYTES) {
+                return { existed: true, skipped: `file is larger than ${Math.round(ChatViewProvider.MAX_TASK_CHANGE_FILE_BYTES / 1024)}KB` };
+            }
             const buffer = fs.readFileSync(resolved.fullPath);
             if (!this.isTextBufferForTurnPatch(buffer)) return { existed: true, skipped: 'binary file' };
             return { existed: true, content: buffer.toString('utf8') };
@@ -2577,7 +2615,14 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 warnings.push(`${snapshot.path}: ${skipped}`);
                 continue;
             }
-            if (filePatch) patches.push(filePatch);
+            if (filePatch) {
+                const nextPatchSize = patches.reduce((sum, part) => sum + part.length, 0) + filePatch.length;
+                if (files.length > ChatViewProvider.MAX_TASK_CHANGE_FILES || nextPatchSize > ChatViewProvider.MAX_TASK_CHANGE_PATCH_CHARS) {
+                    warnings.push(`${snapshot.path}: patch omitted for performance budget`);
+                    continue;
+                }
+                patches.push(filePatch);
+            }
         }
 
         if (files.length === 0) return null;
@@ -2748,8 +2793,6 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         post({ type: 'userMessage', text: `[${skillName}] ${text}` });
         post(this.contextUsageMessage(activeId, { text: `[${skillName}] ${text}` }));
         const turnStartedAt = Date.now();
-        const baselineChanges = await this.agent.getWorkspaceChangeSummary();
-        const baselinePatch = baselineChanges?.patch || '';
         const turnToolChanges: TurnChangeTracker = { files: new Map(), snapshots: new Map() };
         post({ type: 'busy' });
 
@@ -2920,7 +2963,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     const msgs = this.agent.getMessages(activeId);
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
                     post(this.contextUsageMessage(activeId));
-                    this.postTaskChanges(post, baselinePatch, turnToolChanges);
+                    this.postTaskChanges(post, turnToolChanges);
                     if (stoppedByUser) {
                         post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '已手动停止当前任务。' : 'Stopped this task manually.' });
                     }
@@ -2965,10 +3008,10 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         }
     }
 
-    private postTaskChanges(post: (msg: any) => void, _baselinePatch = '', turnToolChanges?: TurnChangeTracker): void {
+    private postTaskChanges(post: (msg: any) => void, turnToolChanges?: TurnChangeTracker): void {
         if (!turnToolChanges || turnToolChanges.files.size === 0) return;
         const snapshotSummary = this.buildSnapshotTurnSummary(turnToolChanges);
-        if (snapshotSummary) {
+        if (snapshotSummary && snapshotSummary.patch) {
             post({ type: 'taskChanges', summary: snapshotSummary });
             return;
         }

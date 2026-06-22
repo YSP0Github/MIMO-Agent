@@ -48,6 +48,96 @@ function makeConv(messages: ConversationState['messages']): ConversationState {
 }
 
 describe('agent convergence guards', () => {
+    it('emits write preview exactly once and includes old text for overwrites', async () => {
+        const agent = makeAgent();
+        const tmpDir = fs.mkdtempSync(path.join(process.cwd(), 'tmp-write-preview-'));
+        const relPath = path.join(path.basename(tmpDir), 'existing.txt');
+        const fullPath = path.join(process.cwd(), relPath);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, 'before', 'utf-8');
+
+        const previews: Array<{ previewId: string; filePath: string; content: string; isCreate: boolean; oldText?: string }> = [];
+        const promise = (agent as any).handleWritePreview(
+            { path: relPath, content: 'after' },
+            {
+                onWritePreview: (previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string) => {
+                    previews.push({ previewId, filePath, content, isCreate, oldText });
+                },
+            },
+        );
+
+        expect(previews.length).toBe(1);
+        expect(previews[0].filePath).toBe(relPath);
+        expect(previews[0].content).toBe('after');
+        expect(previews[0].isCreate).toBe(false);
+        expect(previews[0].oldText).toBe('before');
+
+        (agent as any).confirmWrite(previews[0].previewId, false);
+        await promise;
+
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('uses guarded writes when confirming an external write preview', async () => {
+        const workspace = fs.mkdtempSync(path.join(process.cwd(), 'tmp-agent-workspace-'));
+        const agent = new MiMoAgent({ ...makeAgent().config, workspace }, workspace) as any;
+        const externalDir = fs.mkdtempSync(path.join(process.cwd(), 'tmp-agent-external-'));
+        const externalFile = path.join(externalDir, 'external.txt');
+        fs.writeFileSync(externalFile, 'before', 'utf-8');
+
+        const previews: Array<{ previewId: string }> = [];
+        const promise = agent.handleWritePreview(
+            { path: externalFile, content: 'after' },
+            {
+                onWritePreview: (previewId: string) => {
+                    previews.push({ previewId });
+                },
+            },
+        );
+
+        agent.confirmWrite(previews[0].previewId, true);
+        const result = await promise;
+
+        expect(result).toContain('Written to');
+        expect(result).toContain('[backup]');
+        expect(fs.readFileSync(externalFile, 'utf-8')).toBe('after');
+
+        const backupRoot = path.join(workspace, '.mimo', 'backups');
+        const backups = fs.existsSync(backupRoot)
+            ? fs.readdirSync(backupRoot, { recursive: true }).map(String)
+            : [];
+        const backupName = backups.find(name => name.endsWith('external.txt.bak'));
+        expect(!!backupName).toBe(true);
+
+        fs.rmSync(workspace, { recursive: true, force: true });
+        fs.rmSync(externalDir, { recursive: true, force: true });
+    });
+
+    it('rejects oversized content when confirming a write preview', async () => {
+        const agent = makeAgent() as any;
+        const tmpDir = fs.mkdtempSync(path.join(process.cwd(), 'tmp-write-large-'));
+        const relPath = path.join(path.basename(tmpDir), 'large.txt');
+        const largeContent = 'a'.repeat(6 * 1024 * 1024 + 1);
+
+        const previews: Array<{ previewId: string }> = [];
+        const promise = agent.handleWritePreview(
+            { path: relPath, content: largeContent },
+            {
+                onWritePreview: (previewId: string) => {
+                    previews.push({ previewId });
+                },
+            },
+        );
+
+        agent.confirmWrite(previews[0].previewId, true);
+        const result = await promise;
+
+        expect(result).toContain('Write failed:');
+        expect(result).toContain('too large');
+
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it('detects completed git push delivery from up-to-date and clean evidence', () => {
         const agent = makeAgent();
         const conv = makeConv([
@@ -100,6 +190,47 @@ describe('agent convergence guards', () => {
         const result = agent.detectReasoningLoop(repeated);
         expect(result.detected).toBe(true);
         expect(result.count).toBeGreaterThanOrEqual(5);
+    });
+    it('sanitizes oversized write_file payloads before replaying them to the next model round', () => {
+        const agent = makeAgent();
+        const largeBody = '# Report\n\n' + 'A'.repeat(28000);
+        const conv = makeConv([
+            { role: 'user', content: 'Write a large report and continue.' } as any,
+            {
+                role: 'assistant',
+                content: null as any,
+                tool_calls: [
+                    {
+                        id: 'call-write-1',
+                        type: 'function',
+                        function: {
+                            name: 'write_file',
+                            arguments: JSON.stringify({
+                                path: 'reports/huge-report.md',
+                                content: largeBody,
+                            }),
+                        },
+                    },
+                ],
+                reasoning_content: '',
+            } as any,
+            {
+                role: 'tool',
+                tool_call_id: 'call-write-1',
+                _toolName: 'write_file',
+                content: 'Written to reports/huge-report.md',
+            } as any,
+        ]);
+
+        const runtimeMessages = agent.buildRuntimeContextMessages(conv);
+        const assistantMsg = runtimeMessages.find((msg: any) => msg.role === 'assistant' && msg.tool_calls?.length);
+        expect(!!assistantMsg).toBe(true);
+
+        const replayArgs = JSON.parse(assistantMsg.tool_calls[0].function.arguments);
+        expect(replayArgs.path).toBe('reports/huge-report.md');
+        expect(replayArgs.content).not.toBe(largeBody);
+        expect(replayArgs.content).toContain('omitted from conversation replay');
+        expect(replayArgs.content.length).toBeLessThan(1400);
     });
 
     it('applies reasoning effort to request speed and depth controls', () => {
@@ -477,6 +608,85 @@ describe('agent convergence guards', () => {
         expect(String(runtimeMessages[0].content)).toContain('1 image');
     });
 
+    it('aggressively slims MiMo runtime replay when tool and reasoning history grow large', () => {
+        const agent = makeAgent();
+        agent.updateConfig({
+            ...agent.config,
+            model: 'mimo-v2.5-pro',
+            baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+            activeRoute: { endpoint_id: '', model: 'mimo-v2.5-pro' },
+        });
+        const messages: any[] = [];
+        for (let i = 0; i < 18; i++) {
+            messages.push({ role: 'user', content: `user request ${i} ` + 'u'.repeat(220) });
+            messages.push({
+                role: 'assistant',
+                content: `assistant output ${i} ` + 'a'.repeat(2400),
+                reasoning_content: 'r'.repeat(5000),
+                tool_calls: i % 2 === 0 ? [{
+                    id: `call_${i}`,
+                    type: 'function',
+                    function: { name: 'write_file', arguments: JSON.stringify({ path: `file_${i}.md`, content: 'x'.repeat(8000) }) },
+                }] : undefined,
+            });
+            if (i % 2 === 0) {
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: `call_${i}`,
+                    content: `Written file_${i}.md\n` + 't'.repeat(4000),
+                    _toolName: 'write_file',
+                });
+            }
+        }
+        const conv = makeConv(messages as any);
+        conv.model = 'mimo-v2.5-pro';
+
+        const runtimeMessages = agent.buildRuntimeContextMessages(conv);
+        const toolMessages = runtimeMessages.filter((message: any) => message.role === 'tool');
+        const assistantToolMessages = runtimeMessages.filter((message: any) => message.role === 'assistant' && !!message.tool_calls?.length);
+        const assistantReasoning = runtimeMessages
+            .filter((message: any) => message.role === 'assistant')
+            .map((message: any) => String(message.reasoning_content || ''));
+
+        expect(runtimeMessages.length <= 17).toBe(true);
+        expect(toolMessages.length <= 6).toBe(true);
+        expect(assistantToolMessages.length <= 2).toBe(true);
+        expect(assistantReasoning.some((text: string) => text.length === 0)).toBe(true);
+        expect(assistantReasoning.every((text: string) => text.length <= 800)).toBe(true);
+    });
+
+    it('uses earlier summarization and a smaller keep-recent window for MiMo routes', () => {
+        const agent = makeAgent();
+        const mimoConv = makeConv([{ role: 'user', content: 'task' } as any]);
+        mimoConv.model = 'mimo-v2.5-pro';
+        mimoConv.modelEndpointId = '';
+        agent.updateConfig({
+            ...agent.config,
+            model: 'mimo-v2.5-pro',
+            baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+            activeRoute: { endpoint_id: '', model: 'mimo-v2.5-pro' },
+        });
+
+        const otherAgent = makeAgent();
+        const otherConv = makeConv([{ role: 'user', content: 'task' } as any]);
+        otherConv.model = 'deepseek-chat';
+
+        const noisyMessages = Array.from({ length: 8 }, (_, i) => ({
+            role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+            content: `segment ${i} ` + 'x'.repeat(12000),
+        })) as any;
+        const simplerMessages = Array.from({ length: 4 }, (_, i) => ({
+            role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+            content: `segment ${i} ` + 'x'.repeat(4000),
+        })) as any;
+
+        expect(agent.getContextKeepRecent(mimoConv, 'complex')).toBeLessThan(otherAgent.getContextKeepRecent(otherConv, 'complex'));
+        expect(agent.shouldUseSummarization(noisyMessages, 'mimo-v2.5-pro', 'moderate', 0)).toBe(true);
+        expect(agent.shouldUseSummarization(simplerMessages, 'mimo-v2.5-pro', 'moderate', 0)).toBe(true);
+        expect(otherAgent.shouldUseSummarization(simplerMessages, 'deepseek-chat', 'moderate', 0)).toBe(false);
+        expect(otherAgent.shouldUseSummarization(noisyMessages, 'deepseek-chat', 'moderate', 0)).toBe(true);
+    });
+
     it('distinguishes the same model id on different endpoints', () => {
         const agent = makeAgent();
         agent.updateConfig({
@@ -696,6 +906,80 @@ describe('agent convergence guards', () => {
         const finalText = agent.appendMissingArtifactSummary(conv, '任务完成。');
         expect(finalText.includes(outputHtml)).toBe(false);
         expect(finalText.includes(sourceAsset)).toBe(false);
+    });
+    it('does not keep Auto mode open for a creation-only promise without a real tool step', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: '帮我生成一个测试大文件，用来测试MIMO的生成性能' } as any,
+        ]);
+
+        const decision = agent.shouldContinueAutoAfterTextFinal(
+            conv,
+            'moderate',
+            '好的，我来创建一个大型测试文件。这个文件将是一个完整的 Python 数据分析脚本，用于测试生成性能。',
+            1,
+            600,
+        );
+
+        expect(decision.shouldContinue).toBe(false);
+    });
+    it('keeps Auto mode open when final audio count does not match the user request', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: '请生成 4 个缺失章节的朗读音频。' } as any,
+            {
+                role: 'assistant',
+                content: null as any,
+                tool_calls: Array.from({ length: 4 }, (_, i) => ({
+                    id: `call-${i + 1}`,
+                    type: 'function',
+                    function: {
+                        name: 'mcp_mimo_multimodal_synthesize_speech',
+                        arguments: JSON.stringify({ output: `chapter0${i + 3}.mp3` }),
+                    },
+                })),
+            } as any,
+            {
+                role: 'tool',
+                _toolName: 'mcp_mimo_multimodal_synthesize_speech',
+                content: 'Generated file: G:\\audio\\chapter03.mp3',
+            } as any,
+            {
+                role: 'tool',
+                _toolName: 'mcp_mimo_multimodal_synthesize_speech',
+                content: 'Generated file: G:\\audio\\chapter04.mp3',
+            } as any,
+            {
+                role: 'tool',
+                _toolName: 'mcp_mimo_multimodal_synthesize_speech',
+                content: 'Generated file: G:\\audio\\chapter05.mp3',
+            } as any,
+            {
+                role: 'tool',
+                _toolName: 'mcp_mimo_multimodal_synthesize_speech',
+                content: 'Generated file: G:\\audio\\chapter06.mp3',
+            } as any,
+        ]);
+
+        const decision = agent.shouldContinueAutoAfterTextFinal(
+            conv,
+            'moderate',
+            '4 个音频全部生成成功。全部 6 个音频文件就绪。',
+            2,
+            600,
+        );
+
+        expect(decision.shouldContinue).toBe(true);
+        expect(decision.reason).toContain('requested 4');
+    });
+
+    it('self-check instructions forbid unrelated API-key guidance during verification follow-up', () => {
+        const agent = makeAgent();
+        const msg = agent.buildSelfCheckInstruction('auto', 'needs validation', '音频已生成。');
+        const text = String(msg.content || '');
+
+        expect(text).toContain('Do not introduce unrelated topics such as API keys');
+        expect(text).toContain('settings.json');
     });
 });
 

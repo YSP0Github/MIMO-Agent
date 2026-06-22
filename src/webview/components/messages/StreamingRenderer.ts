@@ -4,6 +4,15 @@
 
 import { parseTodoItems, renderTaskChecklist } from '../taskChecklist';
 
+export function shouldDeferStreamingRender(nextText: string, lastRenderedText: string, lastRenderedAt: number, now: number): boolean {
+    if (nextText === lastRenderedText) return true;
+    if (!lastRenderedText) return false;
+    const deltaChars = Math.abs(nextText.length - lastRenderedText.length);
+    const minDeltaChars = nextText.length > 40_000 ? 2_400 : nextText.length > 18_000 ? 1_200 : 320;
+    const minIntervalMs = nextText.length > 40_000 ? 2_200 : nextText.length > 18_000 ? 1_300 : 450;
+    return deltaChars < minDeltaChars && (now - lastRenderedAt) < minIntervalMs;
+}
+
 export function enhanceTaskChecklists(html: string): string {
     let enhanced = html.replace(
         /<div class="task-checklist">([\s\S]*?)<\/div>\s*<\/div>/g,

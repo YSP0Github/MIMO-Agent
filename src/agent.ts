@@ -5,11 +5,11 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile, spawn } from 'child_process';
 import { MiMoAPI, ChatMessage, ContentPart, ToolCall } from './api';
-import { TOOL_DEFINITIONS, executeTool } from './tools';
+import { TOOL_DEFINITIONS, executeTool, writeTextFileWithGuards } from './tools';
 import { buildSystemPrompt, loadInstructions, validateInstructions } from './prompt';
 import { MiMoConfig } from './config';
 import { Skill, loadSkills, renderSkill, saveUserSkill, deleteUserSkill } from './skills';
-import { manageContext, getContextStats, summarizeContext, recordTokenUsage } from './context';
+import { manageContext, getContextStats, summarizeContext, recordTokenUsage, estimateTotalTokens } from './context';
 import { McpManager, McpServerConfig } from './mcp';
 import { detectPersona, buildPersonaPrompt, getPersona } from './personas';
 import { runSubAgent, SubAgentOptions, SubAgentResult, SubAgentEvents } from './subagent';
@@ -23,9 +23,11 @@ import { DEFAULT_MODELS, MODEL_CAPABILITIES, ModelCapabilities, PREFERRED_CHAT_M
 import { getFriendlyError } from './agentErrors';
 import { buildUserFacingHandoff, stripInternalHandoffNoise } from './handoff';
 import { PLAN_MODE_ANALYSIS_GUIDANCE, PLAN_MODE_EXECUTION_GUIDANCE } from './planMode';
+import { sanitizeMessageToolCallsForConversation, sanitizeToolCallsForConversation } from './toolCallSanitizer';
 export { AgentEvents, AgentMode, ConversationState, TrackedIssue } from './agentTypes';
 export class MiMoAgent extends EventEmitter {
     private api: MiMoAPI;
+    private endpointApis = new Map<string, MiMoAPI>();
     private systemPrompt: string;
     /** Cached personalized instructions from MIMO.md / Agent.md / claude.md */
     private personalizedInstructions: string = '';
@@ -97,9 +99,11 @@ export class MiMoAgent extends EventEmitter {
             || /xiaomimimo|mimo/i.test(this.getEndpointBaseUrl(endpointId));
     }
     private friendlyRouteError(error: Error | string, conv?: ConversationState, endpointId?: string): string {
+        const api = this.getApiForEndpoint(endpointId);
         return getFriendlyError(error, {
             model: conv?.model || this.config.model,
             baseUrl: this.getEndpointBaseUrl(endpointId),
+            requestSummary: api.getLastRequestSummary(),
         });
     }
     private emitTerminalApiError(events: AgentEvents, errorText: string, conv?: ConversationState, endpointId?: string): void {
@@ -113,7 +117,18 @@ export class MiMoAgent extends EventEmitter {
         const profile = this.getProfile(endpointId);
         if (!profile)
             return this.api;
-        return new MiMoAPI(profile.api_key || this.config.apiKey, profile.base_url || this.config.baseUrl, profile.api_endpoint || this.config.apiEndpoint);
+        const cacheKey = JSON.stringify({
+            endpointId: String(endpointId || '').trim(),
+            apiKey: profile.api_key || this.config.apiKey,
+            baseUrl: profile.base_url || this.config.baseUrl,
+            apiEndpoint: profile.api_endpoint || this.config.apiEndpoint,
+        });
+        const cached = this.endpointApis.get(cacheKey);
+        if (cached)
+            return cached;
+        const api = new MiMoAPI(profile.api_key || this.config.apiKey, profile.base_url || this.config.baseUrl, profile.api_endpoint || this.config.apiEndpoint);
+        this.endpointApis.set(cacheKey, api);
+        return api;
     }
     private prepareBuiltinMultimodalArgs(toolName: string, args: Record<string, any>, conv?: ConversationState): Record<string, any> {
         const endpointId = this.getConversationEndpointId(conv);
@@ -132,6 +147,9 @@ export class MiMoAgent extends EventEmitter {
         }
         else if (/synthesize_speech$/i.test(toolName) && !prepared.model) {
             prepared.model = prepared._mimo_tts_model;
+        }
+        else if (/(?:analyze_pdf|render_pdf_pages|analyze_office_document|render_office_pages|inspect_office_archive|analyze_epub|inspect_epub|preview_tabular_data|extract_document_images|sympy_simplify|sympy_solve|matrix_calculator|equation_derivation_checker|math_reasoning_mode)$/i.test(toolName) && !prepared.model) {
+            prepared.model = prepared._mimo_multimodal_model;
         }
         return prepared;
     }
@@ -553,6 +571,26 @@ export class MiMoAgent extends EventEmitter {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         return `${base}-${stamp}.md`;
     }
+    private pickRelatedOutputDirectory(titleSource = ''): string {
+        const text = String(titleSource || '');
+        const matches = Array.from(text.matchAll(/([A-Za-z]:\\[^\r\n"'`]+?\.(?:pdf|md|txt|docx?|pptx?|xlsx?|png|jpe?g)|\/[^\r\n"'`]+?\.(?:pdf|md|txt|docx?|pptx?|xlsx?|png|jpe?g))/gi));
+        for (const match of matches) {
+            const raw = String(match[1] || '').trim();
+            if (!raw) continue;
+            const normalized = raw.replace(/[)"'`]+$/g, '');
+            const resolved = path.isAbsolute(normalized) ? normalized : path.resolve(this.config.workspace, normalized);
+            try {
+                if (fs.existsSync(resolved)) {
+                    const stat = fs.statSync(resolved);
+                    if (stat.isFile()) return path.dirname(resolved);
+                    if (stat.isDirectory()) return resolved;
+                }
+            } catch {
+                // Fall through to workspace default.
+            }
+        }
+        return this.config.workspace;
+    }
     private maybeSaveLongFinalResponse(response: string, events: AgentEvents, titleSource = ''): string {
         const clean = (response || '').trim();
         if (clean.length < 3000 && !this.isSubstantialFinalReport(clean))
@@ -561,11 +599,13 @@ export class MiMoAgent extends EventEmitter {
             return response;
         try {
             const filename = this.buildSummaryFilename(clean, titleSource);
-            const target = path.join(this.config.workspace, filename);
+            const outputDir = this.pickRelatedOutputDirectory(titleSource);
+            const target = path.join(outputDir, filename);
             fs.writeFileSync(target, clean.endsWith('\n') ? clean : `${clean}\n`, 'utf-8');
             events.onReasoning(`[Summary] Long final response saved to ${filename}.`);
             const savedLabel = /[\u4e00-\u9fff]/.test(clean) ? '已另存为' : 'Copy saved';
-            return `${clean}\n\n${savedLabel}: ${filename}`;
+            const pathLabel = /[\u4e00-\u9fff]/.test(clean) ? '保存路径' : 'Saved path';
+            return `${clean}\n\n${savedLabel}: ${filename}\n${pathLabel}: ${target}`;
         }
         catch (e: any) {
             events.onReasoning(`[Summary] Failed to save long final response: ${String(e?.message || e).slice(0, 160)}`);
@@ -696,7 +736,7 @@ export class MiMoAgent extends EventEmitter {
     }
     constructor(private config: MiMoConfig, private extensionPath: string, private context?: vscode.ExtensionContext, private windowSessionId?: string) {
         super();
-        this.api = new MiMoAPI(config.apiKey, config.baseUrl);
+        this.api = new MiMoAPI(config.apiKey, config.baseUrl, config.apiEndpoint);
         this.systemPrompt = buildSystemPrompt(config.workspace);
         this.skills = loadSkills(extensionPath);
         this.mcpManager = new McpManager();
@@ -718,7 +758,8 @@ export class MiMoAgent extends EventEmitter {
     /** Hot-reload config after settings change (no restart needed) */
     updateConfig(newConfig: MiMoConfig): void {
         this.config = newConfig;
-        this.api = new MiMoAPI(newConfig.apiKey, newConfig.baseUrl);
+        this.api = new MiMoAPI(newConfig.apiKey, newConfig.baseUrl, newConfig.apiEndpoint);
+        this.endpointApis.clear();
         this.systemPrompt = buildSystemPrompt(newConfig.workspace);
         this.hookManager = new HookManager(newConfig.settings || {});
         this.memoryManager.updateConfig(newConfig.workspace, newConfig.memory, this.windowSessionId);
@@ -809,6 +850,12 @@ export class MiMoAgent extends EventEmitter {
         }
         return '';
     }
+    private sanitizeConversationToolCalls(toolCalls: ToolCall[] | undefined): ToolCall[] | undefined {
+        return sanitizeToolCallsForConversation(toolCalls);
+    }
+    private sanitizeConversationMessage(message: ChatMessage): ChatMessage {
+        return sanitizeMessageToolCallsForConversation(message);
+    }
     private buildPersistedConversationSnapshot(): Record<string, ConversationState> {
         const MAX_CONVERSATIONS = 30;
         const MAX_MESSAGES_PER_CONVERSATION = 48;
@@ -830,14 +877,16 @@ export class MiMoAgent extends EventEmitter {
             snapshot[id] = {
                 ...conv,
                 messages: messages.map((msg) => {
-                    const maxContent = msg.role === 'tool' ? 2000 : msg.role === 'assistant' ? 8000 : 10000;
-                    const reasoningMax = msg.role === 'assistant' && msg.tool_calls?.length ? 100_000 : 1200;
+                    const safeMsg = this.sanitizeConversationMessage(msg) as any;
+                    const { _uiSnapshot, _uiImages, ...persistableMsg } = safeMsg;
+                    const maxContent = msg.role === 'tool' ? 1600 : msg.role === 'assistant' ? 5000 : 7000;
+                    const reasoningMax = safeMsg.role === 'assistant' && safeMsg.tool_calls?.length ? 100_000 : 1200;
                     return {
-                        ...msg,
-                        content: this.trimPersistedContent(msg.content as any, maxContent),
-                        reasoning_content: msg.reasoning_content
-                            ? this.trimPersistedText(msg.reasoning_content, reasoningMax)
-                            : msg.reasoning_content,
+                        ...persistableMsg,
+                        content: this.trimPersistedContent(persistableMsg.content as any, maxContent),
+                        reasoning_content: safeMsg.reasoning_content
+                            ? this.trimPersistedText(safeMsg.reasoning_content, reasoningMax)
+                            : safeMsg.reasoning_content,
                     };
                 }),
                 contextSummary: conv.contextSummary
@@ -1291,10 +1340,8 @@ export class MiMoAgent extends EventEmitter {
             catch { /* file read failed */ }
         }
         const previewId = `write_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        // Send preview to webview (include oldText for diff)
+        // Send preview to webview once, including oldText for overwrite diff rendering.
         events.onWritePreview?.(previewId, args.path, args.content, isCreate, oldText);
-        // Send preview to webview
-        events.onWritePreview?.(previewId, args.path, args.content, isCreate);
         // Return a promise that resolves when user confirms or rejects
         return new Promise<string>((resolve) => {
             this.pendingWrites.set(previewId, {
@@ -1333,14 +1380,34 @@ export class MiMoAgent extends EventEmitter {
     }
     private shouldUseSummarization(messages: ChatMessage[], model: string, taskComplexity: 'simple' | 'moderate' | 'complex', systemPromptLength?: number): boolean {
         const stats = getContextStats(messages, model, systemPromptLength);
-        if (taskComplexity === 'complex')
-            return stats.percent > 42;
-        if (taskComplexity === 'simple')
-            return stats.percent > 72;
-        return stats.percent > 58;
+        if (this.isMimoModel(model)) {
+            const totalTokens = estimateTotalTokens(messages);
+            switch (taskComplexity) {
+                case 'complex':
+                    return stats.percent > 18 || totalTokens > 3_500;
+                case 'simple':
+                    return stats.percent > 32 || totalTokens > 8_000;
+                default:
+                    return stats.percent > 24 || totalTokens > 4_000;
+            }
+        }
+        switch (taskComplexity) {
+            case 'complex':
+                return stats.percent > 42;
+            case 'simple':
+                return stats.percent > 72;
+            default:
+                return stats.percent > 58;
+        }
     }
     private getContextKeepRecent(conv: ConversationState, taskComplexity: 'simple' | 'moderate' | 'complex'): number {
         const configured = this.config.context?.keepRecentMessages ?? 18;
+        if (this.isMimoRoute(conv, conv.modelEndpointId)) {
+            const mimoBase = Math.min(configured, 10);
+            const mimoModeBoost = conv.mode === 'infinite' ? 4 : 0;
+            const mimoComplexityBoost = taskComplexity === 'complex' ? 4 : taskComplexity === 'moderate' ? 1 : 0;
+            return Math.max(6, Math.min(28, mimoBase + mimoModeBoost + mimoComplexityBoost));
+        }
         const modeBoost = conv.mode === 'infinite' ? 8 : 0;
         const complexityBoost = taskComplexity === 'complex' ? 6 : taskComplexity === 'moderate' ? 2 : 0;
         return Math.max(8, Math.min(80, configured + modeBoost + complexityBoost));
@@ -1360,16 +1427,14 @@ export class MiMoAgent extends EventEmitter {
         return start;
     }
     private buildModelSafeRuntimeMessages(messages: ChatMessage[], model: string): ChatMessage[] {
-        if (this.getModelCapabilities(model).vision) {
-            return messages;
-        }
         return messages.map((message) => {
-            if (!Array.isArray(message.content)) {
-                return message;
+            const safeMessage = this.sanitizeConversationMessage(message);
+            if (this.getModelCapabilities(model).vision || !Array.isArray(safeMessage.content)) {
+                return safeMessage;
             }
             const textParts: string[] = [];
             let imageCount = 0;
-            for (const part of message.content) {
+            for (const part of safeMessage.content) {
                 if (part?.type === 'text' && part.text) {
                     textParts.push(part.text);
                 } else if (part?.type === 'image_url') {
@@ -1377,28 +1442,93 @@ export class MiMoAgent extends EventEmitter {
                 }
             }
             if (imageCount === 0) {
-                return message;
+                return safeMessage;
             }
             const imageNote = `[${imageCount} image${imageCount === 1 ? '' : 's'} were attached earlier. If image details were needed, they were converted to text in the corresponding user turn.]`;
             return {
-                ...message,
+                ...safeMessage,
                 content: [...textParts, imageNote].filter(Boolean).join('\n\n'),
             };
         });
     }
+    private compactAssistantTextForMimo(content: string, maxChars: number): string {
+        const text = String(content || '').trim();
+        if (!text || text.length <= maxChars)
+            return text;
+        const head = text.slice(0, Math.floor(maxChars * 0.55));
+        const tail = text.slice(-Math.floor(maxChars * 0.25));
+        return `${head}\n\n... [assistant output compacted for MiMo replay] ...\n\n${tail}`;
+    }
+    private buildMimoLeanRuntimeMessages(messages: ChatMessage[]): ChatMessage[] {
+        const nonSystem = messages.filter(message => message.role !== 'system');
+        const recentSlice = nonSystem.slice(-16);
+        const toolMessages = recentSlice.filter(message => message.role === 'tool');
+        const toolKeep = new Set(toolMessages.slice(-6));
+        const assistantToolMessages = recentSlice.filter(message => message.role === 'assistant' && !!message.tool_calls?.length);
+        const assistantToolKeep = new Set(assistantToolMessages.slice(-2));
+        return messages
+            .filter((message) => {
+                if (message.role === 'system')
+                    return true;
+                if (!recentSlice.includes(message))
+                    return false;
+                if (message.role === 'tool')
+                    return toolKeep.has(message);
+                if (message.role === 'assistant' && message.tool_calls?.length)
+                    return assistantToolKeep.has(message);
+                return true;
+            })
+            .map((message, index, kept) => {
+                const safeMessage = this.sanitizeConversationMessage(message);
+                if (safeMessage.role === 'assistant') {
+                    const next: ChatMessage = {
+                        ...safeMessage,
+                        content: typeof safeMessage.content === 'string'
+                            ? this.compactAssistantTextForMimo(safeMessage.content, safeMessage.tool_calls?.length ? 900 : 1400)
+                            : safeMessage.content,
+                    };
+                    if (next.tool_calls?.length) {
+                        const isRecentAssistant = index >= kept.length - 4;
+                        next.reasoning_content = isRecentAssistant
+                            ? String(next.reasoning_content || '').slice(-800)
+                            : '';
+                    }
+                    else if (next.reasoning_content) {
+                        next.reasoning_content = '';
+                    }
+                    return next;
+                }
+                if (safeMessage.role === 'tool' && typeof safeMessage.content === 'string') {
+                    return {
+                        ...safeMessage,
+                        content: this.trimPersistedText(safeMessage.content, 600),
+                    };
+                }
+                if (safeMessage.role === 'user' && typeof safeMessage.content === 'string') {
+                    return {
+                        ...safeMessage,
+                        content: this.trimPersistedText(safeMessage.content, 1800),
+                    };
+                }
+                return safeMessage;
+            });
+    }
     private buildRuntimeContextMessages(conv: ConversationState): ChatMessage[] {
         const covered = Math.max(0, Math.min(conv.contextSummaryMessageCount || 0, conv.messages.length));
-        if (!conv.contextSummary || covered <= 0) {
-            return this.buildModelSafeRuntimeMessages(conv.messages, conv.model);
-        }
-        const messages: ChatMessage[] = [
-            {
-                role: 'system',
-                content: `[Auto Context Summary — ${covered} earlier messages compressed]\n${conv.contextSummary}`,
-            } as any,
-            ...conv.messages.slice(covered),
-        ];
-        return this.buildModelSafeRuntimeMessages(messages, conv.model);
+        const messages: ChatMessage[] = (!conv.contextSummary || covered <= 0)
+            ? conv.messages
+            : [
+                {
+                    role: 'system',
+                    content: `[Auto Context Summary - ${covered} earlier messages compressed]
+${conv.contextSummary}`,
+                } as any,
+                ...conv.messages.slice(covered),
+            ];
+        const modelSafe = this.buildModelSafeRuntimeMessages(messages, conv.model);
+        return this.isMimoRoute(conv, conv.modelEndpointId)
+            ? this.buildMimoLeanRuntimeMessages(modelSafe)
+            : modelSafe;
     }
     private shouldRefreshContextMemory(conv: ConversationState, taskComplexity: 'simple' | 'moderate' | 'complex', systemContent: string, safeStart: number, force = false): {
         should: boolean;
@@ -1413,15 +1543,23 @@ export class MiMoAgent extends EventEmitter {
         const cfg = this.config.context;
         const rawStats = getContextStats(conv.messages, conv.model, systemContent.length);
         const runtimeStats = getContextStats(this.buildRuntimeContextMessages(conv), conv.model, systemContent.length);
-        const percentTrigger = conv.mode === 'infinite'
-            ? Math.min(cfg.summarizeAtPercent, taskComplexity === 'complex' ? 45 : 55)
-            : cfg.summarizeAtPercent;
-        const messageTrigger = conv.mode === 'infinite'
-            ? Math.max(16, Math.floor(cfg.summarizeAtMessages * 0.7))
-            : cfg.summarizeAtMessages;
+        const percentTrigger = this.isMimoRoute(conv, conv.modelEndpointId)
+            ? (conv.mode === 'infinite'
+                ? Math.min(cfg.summarizeAtPercent, taskComplexity === 'complex' ? 18 : 24)
+                : Math.min(cfg.summarizeAtPercent, taskComplexity === 'complex' ? 20 : 28))
+            : (conv.mode === 'infinite'
+                ? Math.min(cfg.summarizeAtPercent, taskComplexity === 'complex' ? 45 : 55)
+                : cfg.summarizeAtPercent);
+        const messageTrigger = this.isMimoRoute(conv, conv.modelEndpointId)
+            ? Math.max(10, Math.floor(cfg.summarizeAtMessages * 0.35))
+            : (conv.mode === 'infinite'
+                ? Math.max(16, Math.floor(cfg.summarizeAtMessages * 0.7))
+                : cfg.summarizeAtMessages);
         const covered = conv.contextSummaryMessageCount || 0;
         const newCompressibleMessages = safeStart - covered;
-        const minRefreshBatch = Math.max(6, Math.floor(this.getContextKeepRecent(conv, taskComplexity) / 3));
+        const minRefreshBatch = this.isMimoRoute(conv, conv.modelEndpointId)
+            ? Math.max(3, Math.floor(this.getContextKeepRecent(conv, taskComplexity) / 4))
+            : Math.max(6, Math.floor(this.getContextKeepRecent(conv, taskComplexity) / 3));
         if (newCompressibleMessages <= 0) {
             return { should: false, reason: 'no new old context to summarize' };
         }
@@ -1644,7 +1782,6 @@ Updated summary:`;
         if (!pending)
             return;
         this.pendingWrites.delete(previewId);
-        const path = require('path');
         const { isPathSafe, resolvePath } = require('./safety');
         const targetPath = newPath ? resolvePath(newPath, this.config.workspace) : pending.path;
         const { safe, reason } = isPathSafe(targetPath, this.config.workspace);
@@ -1653,13 +1790,10 @@ Updated summary:`;
             return;
         }
         if (approved) {
-            const fs = require('fs');
             try {
-                const dir = path.dirname(targetPath);
-                if (!fs.existsSync(dir))
-                    fs.mkdirSync(dir, { recursive: true });
-                fs.writeFileSync(targetPath, pending.content, 'utf-8');
-                pending.resolve(`Written to ${targetPath} (approved by user)`);
+                const displayPath = newPath || pending.path;
+                const { bytes, backupNote } = writeTextFileWithGuards(targetPath, displayPath, pending.content, this.config.workspace);
+                pending.resolve(`Written to ${targetPath} (approved by user, ${pending.content.length} chars, ${pending.content.split('\n').length} lines, ${bytes} bytes)${backupNote}`);
             }
             catch (e: any) {
                 pending.resolve(`Write failed: ${e.message}`);
@@ -1901,7 +2035,22 @@ Updated summary:`;
             return parsed && typeof parsed === 'object' ? parsed : {};
         }
         catch {
-            return {};
+            const raw = String(toolCall.function.arguments || '');
+            const recovered: Record<string, any> = {};
+            const pathMatch = raw.match(/"path"\s*:\s*"((?:\\.|[^"\\])*)"/);
+            if (pathMatch) {
+                recovered.path = pathMatch[1]
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, '\\')
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\r/g, '\r')
+                    .replace(/\\t/g, '\t');
+            }
+            const contentMatch = raw.match(/"content"\s*:\s*"([\s\S]*)$/);
+            if (contentMatch) {
+                recovered.content = '[streamed content omitted: tool arguments were incomplete during parsing]';
+            }
+            return recovered;
         }
     }
     private normalizeCommandForIntent(command: string): string {
@@ -2348,6 +2497,178 @@ Change strategy now:
 5. If there is no credible next action, stop and summarize current progress instead of continuing to inspect.`,
         } as any;
     }
+    private getLatestUserGoal(conv: ConversationState): string {
+        for (let i = conv.messages.length - 1; i >= 0; i--) {
+            const msg = conv.messages[i];
+            if (msg.role === 'user') {
+                const text = this.extractMessageText(msg.content);
+                if (text)
+                    return text;
+            }
+        }
+        return '';
+    }
+    private parseCountToken(token: string): number | null {
+        const text = String(token || '').trim();
+        if (!text)
+            return null;
+        if (/^\d+$/.test(text))
+            return Number(text);
+        const digitMap: Record<string, number> = {
+            '零': 0,
+            '一': 1,
+            '二': 2,
+            '两': 2,
+            '三': 3,
+            '四': 4,
+            '五': 5,
+            '六': 6,
+            '七': 7,
+            '八': 8,
+            '九': 9,
+        };
+        if (text === '十')
+            return 10;
+        if (/^[一二两三四五六七八九]十[一二三四五六七八九]?$/.test(text)) {
+            const tens = digitMap[text[0]] || 0;
+            const ones = text.length > 2 ? (digitMap[text[2]] || 0) : 0;
+            return tens * 10 + ones;
+        }
+        if (/^十[一二三四五六七八九]$/.test(text)) {
+            return 10 + (digitMap[text[1]] || 0);
+        }
+        if (/^[零一二两三四五六七八九]$/.test(text)) {
+            return digitMap[text] ?? null;
+        }
+        return null;
+    }
+    private classifyRequestedDeliverableKind(text: string): 'audio' | 'image' | 'video' | 'file' | null {
+        const raw = String(text || '');
+        if (/(?:音频|语音|音轨|朗读|配音|旁白|tts|mp3|wav|audio|speech|voice)/i.test(raw))
+            return 'audio';
+        if (/(?:图片|图像|海报|封面|截图|png|jpg|jpeg|webp|gif|image)/i.test(raw))
+            return 'image';
+        if (/(?:视频|短片|片段|动画|mp4|mov|webm|video)/i.test(raw))
+            return 'video';
+        if (/(?:文件|文档|脚本|表格|pdf|docx?|xlsx?|pptx?|markdown|txt|json|html|file)/i.test(raw))
+            return 'file';
+        return null;
+    }
+    private getDeliverableCountPattern(kind: 'audio' | 'image' | 'video' | 'file'): RegExp {
+        const count = '(\\d+|十[一二三四五六七八九]?|[一二两三四五六七八九]十[一二三四五六七八九]?|[零一二两三四五六七八九])';
+        const unit = '(?:个|段|条|份|章|首|篇)?';
+        const gap = '[^\\r\\n]{0,24}?';
+        switch (kind) {
+            case 'audio':
+                return new RegExp(`${count}\\s*${unit}\\s*${gap}(?:音频|语音|音轨|朗读|配音|旁白|mp3|wav|audio|speech|voice)`, 'i');
+            case 'image':
+                return new RegExp(`${count}\\s*${unit}\\s*${gap}(?:图片|图像|海报|封面|截图|png|jpg|jpeg|webp|gif|image)`, 'i');
+            case 'video':
+                return new RegExp(`${count}\\s*${unit}\\s*${gap}(?:视频|短片|片段|动画|mp4|mov|webm|video)`, 'i');
+            default:
+                return new RegExp(`${count}\\s*${unit}\\s*${gap}(?:文件|文档|脚本|表格|pdf|docx?|xlsx?|pptx?|markdown|txt|json|html|file)`, 'i');
+        }
+    }
+    private extractRequestedDeliverableCount(text: string): { kind: 'audio' | 'image' | 'video' | 'file'; count: number } | null {
+        const raw = String(text || '');
+        if (!/(?:生成|创建|导出|输出|制作|合成|产出|render|generate|create|export|produce|synthesize|build|write)/i.test(raw)) {
+            return null;
+        }
+        const kind = this.classifyRequestedDeliverableKind(raw);
+        if (!kind)
+            return null;
+        const match = raw.match(this.getDeliverableCountPattern(kind));
+        const count = this.parseCountToken(match?.[1] || '');
+        return count && count > 0 ? { kind, count } : null;
+    }
+    private extractClaimedDeliverableCount(text: string, kind: 'audio' | 'image' | 'video' | 'file'): number | null {
+        const match = String(text || '').match(this.getDeliverableCountPattern(kind));
+        return this.parseCountToken(match?.[1] || '');
+    }
+    private extractClaimedDeliverableCounts(text: string, kind: 'audio' | 'image' | 'video' | 'file'): number[] {
+        const counts: number[] = [];
+        const pattern = this.getDeliverableCountPattern(kind);
+        for (const match of String(text || '').matchAll(new RegExp(pattern.source, 'gi'))) {
+            const count = this.parseCountToken(match[1] || '');
+            if (count !== null) {
+                counts.push(count);
+            }
+        }
+        return counts;
+    }
+    private isArtifactOfKind(filePath: string, kind: 'audio' | 'image' | 'video' | 'file'): boolean {
+        const ext = path.extname(String(filePath || '')).replace(/^\./, '').toLowerCase();
+        if (!ext)
+            return false;
+        if (kind === 'audio')
+            return ['mp3', 'wav', 'm4a', 'flac', 'aac', 'ogg', 'opus'].includes(ext);
+        if (kind === 'image')
+            return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
+        if (kind === 'video')
+            return ['mp4', 'mov', 'webm', 'avi', 'mkv'].includes(ext);
+        return ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'csv', 'txt', 'json', 'md', 'html', 'htm'].includes(ext);
+    }
+    private countCurrentTurnGeneratedDeliverables(conv: ConversationState, kind: 'audio' | 'image' | 'video' | 'file'): number {
+        const recentMessages = conv.messages.slice(-80);
+        let startIndex = 0;
+        for (let i = recentMessages.length - 1; i >= 0; i--) {
+            if (recentMessages[i].role === 'user') {
+                startIndex = i;
+                break;
+            }
+        }
+        const currentTurn = recentMessages.slice(startIndex);
+        let toolCallCount = 0;
+        const artifacts = new Set<string>();
+        for (const msg of currentTurn) {
+            if (msg.role === 'assistant' && msg.tool_calls?.length) {
+                for (const tc of msg.tool_calls) {
+                    const name = String(tc.function?.name || '');
+                    if (kind === 'audio' && /synthesize_speech/i.test(name))
+                        toolCallCount++;
+                    else if (kind === 'image' && /(generate|render).*(image|poster|cover)|image_?generation/i.test(name))
+                        toolCallCount++;
+                    else if (kind === 'video' && /(render|generate).*(video|clip|animation)|video_?generation/i.test(name))
+                        toolCallCount++;
+                    else if (kind === 'file' && /^(?:write_file|copy_file|move_file)$/i.test(name))
+                        toolCallCount++;
+                }
+                continue;
+            }
+            if (msg.role !== 'tool')
+                continue;
+            for (const artifact of this.extractArtifactPathsFromText(this.extractMessageText(msg.content))) {
+                if (this.isArtifactOfKind(artifact, kind)) {
+                    artifacts.add(artifact.replace(/\\/g, '/').toLowerCase());
+                }
+            }
+        }
+        return Math.max(toolCallCount, artifacts.size);
+    }
+    private detectRequestedDeliverableMismatch(conv: ConversationState, finalText: string): string {
+        const goal = this.getLatestUserGoal(conv);
+        const requested = this.extractRequestedDeliverableCount(goal);
+        if (!requested)
+            return '';
+        const claimedCounts = this.extractClaimedDeliverableCounts(finalText, requested.kind);
+        const claimed = claimedCounts.length > 0 ? claimedCounts[0] : null;
+        const generated = this.countCurrentTurnGeneratedDeliverables(conv, requested.kind);
+        const inconsistentClaim = claimedCounts.find(count => count !== requested.count);
+        if (inconsistentClaim !== undefined) {
+            return `final answer claims ${inconsistentClaim} ${requested.kind} items, but the user requested ${requested.count}`;
+        }
+        if (claimed !== null && claimed !== requested.count) {
+            return `final answer claims ${claimed} ${requested.kind} items, but the user requested ${requested.count}`;
+        }
+        if (claimed !== null && generated > 0 && claimed !== generated) {
+            return `final answer claims ${claimed} ${requested.kind} items, but this turn only generated ${generated}`;
+        }
+        const soundsComplete = /(?:全部|已全部|全部完成|全部生成|就绪|完成|已完成|done|completed|generated successfully|all .* ready)/i.test(finalText);
+        if (soundsComplete && generated > 0 && generated !== requested.count) {
+            return `user requested ${requested.count} ${requested.kind} items, but only ${generated} generation actions were observed`;
+        }
+        return '';
+    }
     private hasRecentTool(conv: ConversationState, names: string[], lookback = 40): boolean {
         const set = new Set(names);
         return conv.messages.slice(-lookback).some(msg => msg.role === 'tool' && set.has(msg._toolName || ''));
@@ -2457,6 +2778,10 @@ Change strategy now:
             return { shouldContinue: false, reason: '' };
         if (this.isPlanningOrAnalysisDelivery(finalText) || this.isReadOnlyAnalysisFinal(finalText))
             return { shouldContinue: false, reason: '' };
+        const deliverableMismatch = this.detectRequestedDeliverableMismatch(conv, finalText);
+        if (deliverableMismatch) {
+            return { shouldContinue: true, reason: deliverableMismatch };
+        }
         const recentTools = conv.messages.slice(-50).filter(msg => msg.role === 'tool');
         const hasExploration = this.hasRecentTool(conv, [
             'read_file', 'search_files', 'glob_files', 'list_directory',
@@ -2529,7 +2854,16 @@ Change strategy now:
             return { shouldContinue: false, reason: '' };
         if (this.isPlanningOrAnalysisDelivery(finalText) || this.isReadOnlyAnalysisFinal(finalText))
             return { shouldContinue: false, reason: '' };
+        const deliverableMismatch = this.detectRequestedDeliverableMismatch(conv, finalText);
+        if (deliverableMismatch) {
+            return { shouldContinue: true, reason: deliverableMismatch };
+        }
         const recentTools = conv.messages.slice(-40).filter(msg => msg.role === 'tool');
+        const creationOnlyPromise = /(?:let me|i(?:'|’)?ll|i will|now i).{0,120}(?:create|generate|write|make|produce|build).{0,160}(?:file|script|document|markdown|python|test file)|(?:我来|我会|现在我来|接下来我).{0,120}(?:创建|生成|写入|写一个|做一个|产出).{0,160}(?:文件|脚本|文档|markdown|python|测试文件)/i.test(finalText)
+            && !/(?:inspect|check|read|list|search|look|open|scan|run|verify|diff|查看|检查|读取|列出|搜索|验证|确认|审查)/i.test(finalText);
+        if (creationOnlyPromise) {
+            return { shouldContinue: false, reason: '' };
+        }
         if (this.isUnexecutedActionStatement(finalText)) {
             return { shouldContinue: true, reason: 'assistant announced a pending tool-backed step instead of a final answer' };
         }
@@ -2579,7 +2913,7 @@ The previous assistant response looked like a final answer, but the completion g
 Previous final draft:
 ${finalText.slice(0, 1600)}
 
-Continue the task now. Treat the previous final draft as already shown to the user and preserve it unless new evidence proves it wrong. Prefer append-only follow-up: verification results, concrete checks, or a concise correction. Do not retract or rewrite the whole draft just to restate it. Use tools if needed to inspect files, validate changes, or close the missing evidence. Keep user-visible progress concise and in the user's language. Avoid "Let me..." narration; state only the concrete next action. Only produce a final answer after the user requirements, file evidence, and validation status are clear.`,
+Continue the task now. Treat the previous final draft as already shown to the user and preserve it unless new evidence proves it wrong. Prefer append-only follow-up: verification results, concrete checks, or a concise correction. Do not retract or rewrite the whole draft just to restate it. Use tools if needed to inspect files, validate changes, or close the missing evidence. Keep user-visible progress concise and in the user's language. Avoid "Let me..." narration; state only the concrete next action. Only produce a final answer after the user requirements, file evidence, and validation status are clear. Do not introduce unrelated topics such as API keys, provider setup, settings.json, endpoint switching, or configuration advice unless the user explicitly asked about configuration or the tool/model actually returned a configuration/authentication error in this turn.`,
         } as any;
     }
     /** Mark a conversation's agent as finished */
@@ -3689,7 +4023,7 @@ ${friendlyError}`;
             // when replaying assistant tool_calls with their tool results.
             if (toolCalls.length > 0) {
                 assistantMsg.reasoning_content = reasoningContent || (reasoningWasTrimmed ? '[reasoning trimmed]' : '');
-                assistantMsg.tool_calls = toolCalls;
+                assistantMsg.tool_calls = this.sanitizeConversationToolCalls(toolCalls);
                 // When tool_calls exist, content should be null (not empty string)
                 // to match the model's actual response format and avoid API 400 errors.
                 if (!content) {
@@ -3767,11 +4101,7 @@ ${friendlyError}`;
             const readFileRanges = this.collectReadFileRangesThisTurn(conv);
             const tasks: ToolTask[] = [];
             toolCalls.forEach((tc, i) => {
-                let args: Record<string, any> = {};
-                try {
-                    args = JSON.parse(tc.function.arguments);
-                }
-                catch { /* empty */ }
+                let args: Record<string, any> = this.parseToolArgs(tc);
                 if (this.mcpManager.isMcpTool(tc.function.name) && /^mcp_mimo_multimodal_/i.test(tc.function.name)) {
                     args = this.prepareBuiltinMultimodalArgs(tc.function.name, args, conv);
                 }
@@ -4905,7 +5235,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
             // Execute tool calls
             const assistantMsg: ChatMessage = {
                 role: 'assistant', content: result.content || null as any,
-                tool_calls: result.toolCalls, reasoning_content: reasoningText || '',
+                tool_calls: this.sanitizeConversationToolCalls(result.toolCalls), reasoning_content: reasoningText || '',
             };
             messages.push(assistantMsg);
             // Collect tool call summaries for narration
@@ -4914,11 +5244,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
                 // Check stop signal before each tool execution
                 if (this.isStopping(convId || this.activeId, signal))
                     break;
-                let args: Record<string, any> = {};
-                try {
-                    args = JSON.parse(tc.function.arguments);
-                }
-                catch { /* empty */ }
+                let args: Record<string, any> = this.parseToolArgs(tc);
                 if (this.mcpManager.isMcpTool(tc.function.name) && /^mcp_mimo_multimodal_/i.test(tc.function.name)) {
                     args = this.prepareBuiltinMultimodalArgs(tc.function.name, args, conv);
                 }
@@ -5375,7 +5701,9 @@ Required behavior:
 
 2. If work is incomplete, output a concise recovery handoff: completed work, changed files, validation status, exact next command/action.
 
-3. Do not repeat prior analysis. Start the answer with "RECOVERY:" or "SUMMARY:".`;
+3. Do not repeat prior analysis. Start the answer with "RECOVERY:" or "SUMMARY:".
+
+4. Do not introduce unrelated configuration guidance such as API keys, provider setup, base URLs, endpoint switching, or settings files unless the progress summary explicitly shows a real configuration/authentication failure in this turn.`;
             // Build a fresh message list with clear instructions
             const freshMessages: ChatMessage[] = [
                 {
@@ -5470,7 +5798,9 @@ Output format:
 
 - Give the next concrete step to resume.
 
-- Keep it concise and do not apologize.`;
+- Keep it concise and do not apologize.
+
+- Do not introduce unrelated configuration guidance such as API keys, provider setup, base URLs, endpoint switching, or settings files unless the progress summary explicitly shows a real configuration/authentication failure in this turn.`;
             const messages: ChatMessage[] = [
                 {
                     role: 'system',

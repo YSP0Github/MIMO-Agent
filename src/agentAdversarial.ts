@@ -527,7 +527,7 @@ export async function runAdversarialPersonaImpl(
             // Execute tool calls
             const assistantMsg: ChatMessage = {
                 role: 'assistant', content: result.content || null as any,
-                tool_calls: result.toolCalls, reasoning_content: reasoningText || '',
+                tool_calls: this.sanitizeConversationToolCalls(result.toolCalls), reasoning_content: reasoningText || '',
             };
             messages.push(assistantMsg);
 
